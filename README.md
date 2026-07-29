@@ -56,8 +56,9 @@
 7. [MCP Servers](#7-mcp-servers)
 8. [GPU Support](#8-gpu-support)
 9. [Advanced: Sharing Host Python Packages](#9-advanced-sharing-host-python-packages)
-10. [Updating the Image](#10-updating-the-image)
-11. [Troubleshooting](#11-troubleshooting)
+10. [LaTeX](#10-latex)
+11. [Updating the Image](#11-updating-the-image)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -534,7 +535,47 @@ Packages installed with `uv pip install` inside the container go into the contai
 
 ---
 
-## 10. Updating the Image
+## 10. LaTeX
+
+TeX Live is **baked into the image**: `pdflatex`, `xelatex`, `lualatex`, `latexmk`, `biber`, `bibtex`, `makeindex`, EPS includes, `pdfcrop`, and the `dvips`/`ps2pdf` route all work out of the box.
+
+Nothing is bind-mounted from the host, so **your host needs no TeX Live at all** and LaTeX behaves identically everywhere. The trade is image size — TeX Live is large — so the package set is a build argument:
+
+| `LATEX_SCHEME` | Image size | Build time | Engines | Use when |
+|---|---|---|---|---|
+| `curated` **(default)** | 3.86 GB | ~17 min | pdflatex, xelatex, lualatex, latex | Ordinary documents: papers, reports, theses |
+| `full` | ~8 GB * | ~30 min * | all of the above | You want every package Debian ships |
+| `minimal` | 1.32 GB | ~4 min | pdflatex, lualatex, latex (no xelatex) | Simple documents; no tikz, no biber |
+| `none` | 1.03 GB | ~1 min | — | You don't want LaTeX in the image |
+
+> Sizes are the whole image (the LaTeX-free base is 1.03 GB). These builds are slow —
+> mostly download plus format generation — and changing `LATEX_SCHEME` re-runs all of it.
+>
+> \* `full` numbers are estimates — `curated`, `minimal` and `none` were built and tested;
+> `full` was not. See [`LATEX.md`](LATEX.md).
+
+```bash
+podman build -t coding-seal:latest .                                    # curated (default)
+podman build --build-arg LATEX_SCHEME=full -t coding-seal:latex-full .  # everything
+podman build --build-arg LATEX_SCHEME=none -t coding-seal:nolatex .     # opt out
+```
+
+Then just use it — no extra flags, no mounts:
+
+```bash
+scripts/run.sh -p ~/projects/paper
+# inside: latexmk -pdf thesis.tex
+```
+
+`curated` covers the usual macro territory (`tikz`/`pgfplots`, `amsmath`, `booktabs`, `microtype`, `biblatex`, `algorithm2e`, `siunitx`, …) with German and English hyphenation. It leaves out 2.3 GB of offline PDF manuals, the other language trees, ConTeXt, and specialist collections. If a document needs one more package, add it to the `curated` list in the `Containerfile` and rebuild — that is much cheaper than switching to `full`.
+
+A **smoke test runs during the build**: a one-page `pdflatex` document must compile or the build fails, so a broken package set is caught at build time rather than by your first document.
+
+> **See [`LATEX.md`](LATEX.md)** for the exact package lists, what each scheme omits, why `ghostscript` and the `fonts-texgyre`/`fonts-lmodern` packages are named explicitly, and the trade-offs against the alternative approach (mounting the host's TeX Live instead, on the `latex-host-mount` branch).
+
+---
+
+## 11. Updating the Image
 
 **When do you need to rebuild?**
 
@@ -554,9 +595,19 @@ podman build --build-arg PYTHON_VERSION=3.11 -t coding-seal:py311 .
 CLAUDE_IMAGE=localhost/coding-seal:py311 scripts/run.sh -p ~/projects/myproject
 ```
 
+**Custom LaTeX package set** (see [Section 10](#10-latex)):
+```bash
+podman build --build-arg LATEX_SCHEME=full -t coding-seal:latex-full .
+CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
+```
+
+> The LaTeX layer sits early in the `Containerfile`, so it stays cached when you change
+> the Node/uv/Claude layers below it. Changing `LATEX_SCHEME` rebuilds it (and everything
+> after) — that is a multi-GB download for `full`.
+
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -582,6 +633,14 @@ CLAUDE_IMAGE=localhost/coding-seal:py311 scripts/run.sh -p ~/projects/myproject
 | `--rc`: "Remote Control requires a full-scope login token" | No claude.ai login in the auth folder (e.g. you deleted it) | Run `scripts/run.sh --auth` once to save a full claude.ai login, then `scripts/run.sh --rc`. The login in `~/.codingseal/claude-auth/.credentials.json` is what Remote Control uses |
 | `--rc`: "Remote Control requires a claude.ai subscription" / "not yet enabled" | No claude.ai login, or feature not rolled out to your account | `scripts/run.sh --auth` to log in; confirm your plan supports it (Pro/Max/Team/Enterprise). On Team/Enterprise an Owner must enable the Remote Control toggle in admin settings |
 | `--rc`: no session URL appears / `claude: command not found` for `remote-control` | Image predates Remote Control (needs Claude Code v2.1.51+) | Rebuild: `podman build --pull=newer -t coding-seal:latest .` |
+| `pdflatex: command not found` | Image built with `LATEX_SCHEME=none`, or predates LaTeX support | Rebuild: `podman build -t coding-seal:latest .` |
+| `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 10](#10-latex) |
+| `pdfcrop`/`texcount` not found but every `.sty` is present | Style files and executables come from *different* packages — these binaries live in `texlive-extra-utils` | Present in `curated` and `full`; add `texlive-extra-utils` if you customised the list |
+| `LaTeX Error: File 'foo.sty' not found` | The package isn't in the scheme you built | Add the owning `texlive-*` package to the `curated` list in the `Containerfile` and rebuild, or build `LATEX_SCHEME=full`. Find the owner via [packages.ubuntu.com](https://packages.ubuntu.com) |
+| `fontspec error: The font "…" cannot be found` | Only Type 1 faces present, not OpenType | `curated` and `full` install `fonts-texgyre`/`fonts-lmodern` for exactly this; `minimal` has no `fontspec` at all. Check with `podman run --rm --entrypoint fc-match coding-seal:latest "TeX Gyre Pagella"` |
+| `…-eps-converted-to.pdf not found` on `\includegraphics{x.eps}` | Ghostscript or `repstopdf` missing | All schemes except `none` install `ghostscript`; verify with `podman run --rm --entrypoint gs coding-seal:latest --version` |
+| Build fails at `pdflatex smoke test FAILED` | The chosen `LATEX_SCHEME` is genuinely broken | This is the build-time guard doing its job — the failing `pdflatex` log is printed above the error |
+| Image is much bigger than expected | `LATEX_SCHEME=full` adds ~7.4 GB (incl. 2.3 GB of manuals it cannot drop) | Use the default `curated` (~2.9 GB) or `none`; check with `podman images` |
 
 ---
 
@@ -591,7 +650,8 @@ CLAUDE_IMAGE=localhost/coding-seal:py311 scripts/run.sh -p ~/projects/myproject
 codingseal/
 ├── codingseal.png            ← Project logo
 ├── README.md                 ← This tutorial
-├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + sshd (tini as PID 1, no entrypoint script)
+├── LATEX.md                  ← LaTeX package sets, what each scheme omits, trade-offs (§10)
+├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + sshd (tini as PID 1, no entrypoint script)
 ├── .env.example              ← Copy to .env; set SSH_PUBLIC_KEY for --ssh
 ├── scripts/
 │   └── run.sh                ← Wrapper: seeds config + runs --auth / --rc / --ssh / -p PATH / --gpu-nvidia|amd
