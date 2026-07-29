@@ -249,12 +249,17 @@ fi
 PODMAN_FLAGS=(
     "--name"    "${CONTAINER_NAME}"
     "--rm"
-    # Map your host user (uid 1000) to the container's `coder` user so bind-mounted
-    # project files stay owned by you and the seeded config dir is writable. With
-    # bare keep-id the container runs AS coder (uid 1000) — no root, so Claude's
-    # bypass-permissions mode runs with no prompt and no IS_SANDBOX trick. Only
-    # --ssh adds `--user 0` (below), because sshd needs root to start.
-    "--userns=keep-id"
+    # Map your host user onto the container's `coder` user (uid/gid 1000) so
+    # bind-mounted project files stay owned by you and the seeded config dir is
+    # writable. The explicit uid=/gid= is REQUIRED: bare keep-id passes your host
+    # uid through unchanged, so on a host where you aren't uid 1000 the container
+    # runs as a uid that doesn't exist in the image and can't even traverse
+    # /home/coder (mode 750, owned by coder) — login then fails to write
+    # .credentials.json, silently, after the OAuth flow reports success.
+    # The container runs AS coder — no root, so Claude's bypass-permissions mode
+    # runs with no prompt and no IS_SANDBOX trick. Only --ssh adds `--user 0`
+    # (below), because sshd needs root to start.
+    "--userns=keep-id:uid=1000,gid=1000"
     # Persistent login + seeded config. :Z applies a private SELinux label
     # (no-op on Ubuntu, correct on Fedora/RHEL).
     "--volume"  "${CLAUDE_AUTH_DIR}:/home/coder/.claude:Z"
