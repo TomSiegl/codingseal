@@ -57,6 +57,7 @@
 8. [GPU Support](#8-gpu-support)
 9. [Advanced: Sharing Host Python Packages](#9-advanced-sharing-host-python-packages)
 10. [LaTeX](#10-latex)
+    - [Fonts and pandoc](#fonts-and-pandoc)
 11. [Updating the Image](#11-updating-the-image)
 12. [Troubleshooting](#12-troubleshooting)
 
@@ -543,13 +544,15 @@ Nothing is bind-mounted from the host, so **your host needs no TeX Live at all**
 
 | `LATEX_SCHEME` | Image size | Build time | Engines | Use when |
 |---|---|---|---|---|
-| `curated` **(default)** | 3.86 GB | ~17 min | pdflatex, xelatex, lualatex, latex | Ordinary documents: papers, reports, theses |
-| `full` | ~8 GB * | ~30 min * | all of the above | You want every package Debian ships |
-| `minimal` | 1.32 GB | ~4 min | pdflatex, lualatex, latex (no xelatex) | Simple documents; no tikz, no biber |
-| `none` | 1.03 GB | ~1 min | — | You don't want LaTeX in the image |
+| `curated` **(default)** | 4.16 GB | ~19 min | pdflatex, xelatex, lualatex, latex | Ordinary documents: papers, reports, theses |
+| `full` | ~8.3 GB * | ~32 min * | all of the above | You want every package Debian ships |
+| `minimal` | 1.66 GB | ~6 min | pdflatex, lualatex, latex (no xelatex) | Simple documents; no tikz, no biber |
+| `none` | 1.34 GB | ~3 min | — | You don't want LaTeX in the image |
 
-> Sizes are the whole image (the LaTeX-free base is 1.03 GB). These builds are slow —
-> mostly download plus format generation — and changing `LATEX_SCHEME` re-runs all of it.
+> Sizes are the whole image, and every one of them includes the ~300 MB of fonts and pandoc
+> below, which are installed regardless of scheme (the base with neither LaTeX nor
+> fonts/pandoc is 1.03 GB). These builds are slow — mostly download plus format generation
+> — and changing `LATEX_SCHEME` re-runs all of it.
 >
 > \* `full` numbers are estimates — `curated`, `minimal` and `none` were built and tested;
 > `full` was not. See [`LATEX.md`](LATEX.md).
@@ -569,9 +572,37 @@ scripts/run.sh -p ~/projects/paper
 
 `curated` covers the usual macro territory (`tikz`/`pgfplots`, `amsmath`, `booktabs`, `microtype`, `biblatex`, `algorithm2e`, `siunitx`, …) with German and English hyphenation. It leaves out 2.3 GB of offline PDF manuals, the other language trees, ConTeXt, and specialist collections. If a document needs one more package, add it to the `curated` list in the `Containerfile` and rebuild — that is much cheaper than switching to `full`.
 
-A **smoke test runs during the build**: a one-page `pdflatex` document must compile or the build fails, so a broken package set is caught at build time rather than by your first document.
+**Smoke tests run during the build**: a one-page `pdflatex` document must compile, and so must the font and pandoc checks below, or the build fails — so a broken package set is caught at build time rather than by your first document.
 
-> **See [`LATEX.md`](LATEX.md)** for the exact package lists, what each scheme omits, why `ghostscript` and the `fonts-texgyre`/`fonts-lmodern` packages are named explicitly, and the trade-offs against the alternative approach (mounting the host's TeX Live instead, on the `latex-host-mount` branch).
+### Fonts and pandoc
+
+Independent of `LATEX_SCHEME`, the image also carries **real system fonts** and **pandoc**:
+
+| | |
+|---|---|
+| **Microsoft core fonts** | Arial, Times New Roman, Courier New, Georgia, Verdana, Trebuchet MS, Comic Sans MS, Impact, Andale Mono — so `\setmainfont{Arial}` just works under xelatex/lualatex |
+| **Metric clones** | Liberation (Arial/Times/Courier), Carlito (Calibri), Caladea (Cambria) |
+| **General coverage** | DejaVu, FreeFont, Noto Core (Greek, Cyrillic, Hebrew, Arabic, … — no CJK) |
+| **pandoc** | 3.1.3. Markdown/HTML/docx/odt/epub/LaTeX conversion, and PDF output through the LaTeX above (`--pdf-engine=pdflatex\|xelatex\|lualatex`) |
+
+With `LATEX_SCHEME=minimal`, pandoc's PDF output works via `pdflatex` only; with `none` it converts everything except PDF. Everything else in the table is present in every scheme.
+
+The `texlive-fonts-*` packages do **not** cover this: they populate the texmf tree for pdflatex's NFSS names, but install almost nothing that fontconfig can see — and fontconfig is how `fontspec` finds fonts. Nor do the metric clones alone suffice: `fc-match Arial` happily answers `Liberation Sans` via fontconfig aliasing, while `\setmainfont{Arial}` still fails, because `fontspec` matches on the family's own name. Only the real fonts fix it.
+
+These sit in a layer **after** the TeX Live layers, so adding a font or bumping pandoc never re-runs the ~17-minute LaTeX install.
+
+The Microsoft fonts come from `ttf-mscorefonts-installer`, which needs a EULA (preseeded for you) and downloads from SourceForge at build time. Drop them if you'd rather not take that dependency:
+
+```bash
+podman build --build-arg MSCOREFONTS=false -t coding-seal:latest .
+```
+
+That saves ~2 minutes of build time but only ~20 MB, so it is a licensing and
+build-reliability choice, not a size one. The cost is that `\setmainfont{Arial}` no longer works.
+
+The build-time smoke test covers all of this too: a `fontspec` document must compile with Arial (or Liberation Sans when `MSCOREFONTS=false`), and `pandoc` must produce a PDF.
+
+> **See [`LATEX.md`](LATEX.md)** for the exact package lists, what each scheme omits, why `ghostscript` and the `fonts-texgyre`/`fonts-lmodern` packages are named explicitly, the font-resolution trap in detail, and the trade-offs against the alternative approach (mounting the host's TeX Live instead, on the `latex-host-mount` branch).
 
 ---
 

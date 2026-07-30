@@ -122,6 +122,137 @@ RUN set -eu; \
     echo "LaTeX smoke test OK (scheme=${LATEX_SCHEME}): $(pdflatex --version | head -1)"; \
     rm -f /tmp/smoke.*
 
+# ── System fonts + pandoc ──────────────────────────────────────────────────
+# Deliberately placed AFTER the LaTeX layers: editing this section never
+# invalidates the (slow) TeX Live install above.
+#
+# WHY THIS IS SEPARATE FROM texlive-fonts-*: the texlive-* packages ship fonts
+# into the texmf tree for pdflatex's NFSS names (\usepackage{helvet}). They
+# install almost nothing that fontconfig can see, so under xelatex/lualatex
+# every `\setmainfont{<a normal font name>}` fails. fontspec looks fonts up by
+# FAMILY NAME via fontconfig, and — importantly — it does NOT honour
+# fontconfig's metric-substitution aliases: with only fonts-liberation present,
+# `fc-match Arial` happily answers "Liberation Sans" while
+# `\setmainfont{Arial}` still dies with "The font "Arial" cannot be found".
+# Metric-compatible clones are therefore not a substitute for the real families;
+# a font is usable from fontspec only if its own name is installed.
+#
+#   ttf-mscorefonts-installer  the actual Microsoft core fonts — Arial, Times
+#                              New Roman, Courier New, Georgia, Verdana,
+#                              Trebuchet MS, Comic Sans MS, Impact, Andale Mono,
+#                              Webdings. 5.5 MB of fonts. This is what makes
+#                              \setmainfont{Arial} work.
+#   fonts-liberation{,2}       Arial/Times/Courier metric clones. Worth having
+#                              even with the real fonts present: they are what
+#                              fontconfig substitutes for an Arial request that
+#                              never reaches fontspec (pandoc's HTML/docx output,
+#                              pdflatex), and they are the fallback the smoke
+#                              test uses when MSCOREFONTS=false.
+#   fonts-crosextra-carlito    Calibri metric clone (name: "Carlito")
+#   fonts-crosextra-caladea    Cambria metric clone (name: "Caladea")
+#   fonts-dejavu{,-extra}      supersedes the fonts-dejavu-core above
+#   fonts-freefont-ttf         URW Free{Serif,Sans,Mono}, wide coverage
+#   fonts-noto-core            Greek/Cyrillic/Hebrew/Arabic/… so xelatex can set
+#                              non-Latin scripts at all (no CJK — that is 200 MB+)
+#   fontconfig, lmodern        not fonts as such; see the notes at the RUN below
+#   pandoc                     3.1.3 from Ubuntu. ~250 MB, most of it the static
+#                              Haskell binary. It has no PDF machinery of its own
+#                              and drives the LaTeX above: under curated/full all
+#                              of --pdf-engine=pdflatex|xelatex|lualatex work,
+#                              under minimal only pdflatex (see the lmodern note),
+#                              and under none every conversion works except PDF.
+#
+# Two caveats on ttf-mscorefonts-installer, both unavoidable:
+#   • It is the only step in this file needing a EULA accepted, preseeded via
+#     debconf-set-selections below, and its postinst fetches the fonts from
+#     SourceForge one file at a time — slow, and the least reliable network
+#     dependency in the build (~2 min of the total).
+#   • It hard-Depends on update-notifier-common (that is the download mechanism
+#     it uses), which drags in python3-apt and ubuntu-pro-client: ~35 MB of
+#     machinery that is useless in a container. --no-install-recommends does not
+#     help, these are Depends. Purging them afterwards would delete the fonts.
+# Set --build-arg MSCOREFONTS=false to drop all of it; everything else here still
+# installs, and Arial then resolves only through fontconfig substitution (usable
+# from pdflatex/`fc-match`, NOT from \setmainfont).
+ARG MSCOREFONTS=true
+RUN set -eu; \
+    # fontconfig is named here as well as in the LaTeX block's COMMON: with
+    # LATEX_SCHEME=none that block exits before installing anything, so relying
+    # on it would leave this layer calling a non-existent fc-cache. apt makes the
+    # duplicate a no-op in every other scheme.
+    FONTS="fontconfig \
+           fonts-liberation fonts-liberation2 \
+           fonts-crosextra-carlito fonts-crosextra-caladea \
+           fonts-dejavu fonts-dejavu-extra fonts-freefont-ttf fonts-noto-core"; \
+    # pandoc's default LaTeX template does \usepackage{lmodern}, which the
+    # `minimal` scheme does not ship — so `pandoc -o x.pdf` failed there with
+    # "File `lmodern.sty' not found" while every other pandoc output worked.
+    # Adding it HERE rather than to the minimal PKGS list is deliberate: it keeps
+    # the slow LaTeX layers untouched. `curated` already has it, so apt no-ops.
+    # Skipped for `none`, which has no TeX at all and should stay that way.
+    if [ "${LATEX_SCHEME}" != "none" ]; then FONTS="${FONTS} lmodern"; fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ${FONTS} pandoc; \
+    if [ "${MSCOREFONTS}" = "true" ]; then \
+        echo 'ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true' \
+            | debconf-set-selections; \
+        apt-get install -y --no-install-recommends ttf-mscorefonts-installer; \
+    else \
+        echo "MSCOREFONTS=false — skipping the Microsoft core fonts"; \
+    fi; \
+    rm -rf /var/lib/apt/lists/* /var/lib/update-notifier/package-data-downloads/partial; \
+    # Bake the system-wide fontconfig cache into the image so the first xelatex
+    # run as `coder` doesn't have to build one.
+    fc-cache -fs
+
+# Same reasoning as the LaTeX smoke test: prove the font lookup and pandoc work
+# now, in the build, rather than in the user's first document.
+RUN set -eu; \
+    if [ "${MSCOREFONTS}" = "true" ]; then \
+        fc-match Arial | grep -q '"Arial"' \
+            || { echo "Arial is not installed as a family: $(fc-match Arial)"; exit 1; }; \
+    fi; \
+    echo "pandoc OK: $(pandoc --version | head -1)"; \
+    if [ "${LATEX_SCHEME}" = "none" ]; then \
+        echo "scheme=none has no TeX — skipping the fontspec and PDF tests"; \
+        exit 0; \
+    fi; \
+    cd /tmp; \
+    # The fontspec test needs xelatex, which `minimal` does not ship. The
+    # pandoc->PDF test only needs pdflatex, so it runs in every scheme but `none`.
+    if [ "${LATEX_SCHEME}" = "minimal" ]; then \
+        echo "scheme=minimal has no xelatex — skipping the fontspec test only"; \
+    else \
+        if [ "${MSCOREFONTS}" = "true" ]; then \
+            MAIN="Arial"; ALT="Times New Roman"; \
+        else \
+            MAIN="Liberation Sans"; ALT="Liberation Serif"; \
+        fi; \
+        # fontspec errors out (it does not silently substitute) when a family is
+        # missing, so -halt-on-error here really does test the lookup.
+        # printf, not echo: /bin/sh is dash, whose echo turns \b and \a into
+        # control characters — \begin and \alt would be mangled.
+        printf '%s\n' \
+            '\documentclass{article}' \
+            '\usepackage{fontspec}' \
+            "\\setmainfont{${MAIN}}" \
+            "\\newfontfamily\\alt{${ALT}}" \
+            '\newfontfamily\clone{Carlito}' \
+            '\begin{document}' \
+            'Sans. {\alt Serif.} {\clone Clone.}' \
+            '\end{document}' > fonts.tex; \
+        xelatex -interaction=nonstopmode -halt-on-error fonts.tex >/tmp/fonts.log 2>&1 \
+            || { echo "=== xelatex/fontspec smoke test FAILED ==="; tail -30 /tmp/fonts.log; exit 1; }; \
+        [ -s /tmp/fonts.pdf ] || { echo "fontspec test produced no PDF"; exit 1; }; \
+        echo "xelatex/fontspec smoke test OK (mscorefonts=${MSCOREFONTS})"; \
+    fi; \
+    printf '%s\n' '# Pandoc' '' 'Math $e^{i\pi}+1=0$.' > pandoc.md; \
+    pandoc pandoc.md -o pandoc.pdf --pdf-engine=pdflatex >/tmp/pandoc.log 2>&1 \
+        || { echo "=== pandoc -> PDF FAILED ==="; cat /tmp/pandoc.log; exit 1; }; \
+    [ -s /tmp/pandoc.pdf ] || { echo "pandoc produced no PDF"; exit 1; }; \
+    echo "pandoc -> PDF smoke test OK (scheme=${LATEX_SCHEME})"; \
+    rm -f /tmp/fonts.* /tmp/pandoc.*
+
 # ── Non-root user ──────────────────────────────────────────────────────────
 # Claude Code's bypass-permissions mode refuses to run as root. Running as a
 # normal user is the canonical fix: the guard (getuid()===0) never fires.
