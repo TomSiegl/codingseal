@@ -53,6 +53,7 @@
    - [Mode B: VS Code Remote-SSH](#mode-b-vs-code-remote-ssh)
    - [Mode C: Access from a Remote Machine](#mode-c-access-from-a-remote-machine)
    - [Mode D: Remote Control — drive from claude.ai/code](#mode-d-remote-control--drive-from-claudeaicode)
+   - [SSH Agent Forwarding — git push with your host keys](#ssh-agent-forwarding--git-push-with-your-host-keys)
 7. [MCP Servers](#7-mcp-servers)
 8. [GPU Support](#8-gpu-support)
 9. [Advanced: Sharing Host Python Packages](#9-advanced-sharing-host-python-packages)
@@ -423,6 +424,47 @@ Because nothing inbound is exposed, this works through NAT and firewalls with no
 
 ---
 
+### SSH Agent Forwarding — git push with your host keys
+
+No private key is ever baked into the image or copied into the container. To let Claude `git push`, `git pull` from a private repo, or sign commits, forward your **host** SSH agent instead: the container gets the *ability to use* your keys for the lifetime of the session, never the key material.
+
+#### Over SSH (Modes B–C)
+
+Add `ForwardAgent yes` to the host block you created in Mode B:
+
+```
+Host claude-container
+    HostName 127.0.0.1
+    Port 2222
+    User coder
+    IdentityFile ~/.ssh/id_ed25519
+    ForwardAgent yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+```
+
+…or pass `-A` per connection: `ssh -A -p 2222 -i ~/.ssh/id_ed25519 coder@localhost`.
+
+Nothing to change on the container side — `config/sshd_config` doesn't touch `AllowAgentForwarding`, and OpenSSH defaults it to `yes`. VS Code's Remote-SSH reads the same `~/.ssh/config` block, so the integrated terminal (and therefore Claude Code running in it) gets the agent too.
+
+Verify inside the container:
+```bash
+ssh-add -l                 # lists your host keys → the forwarded agent is reachable
+ssh -T git@github.com      # "Hi <user>! You've successfully authenticated…"
+git -C ~/projects/myproject push
+```
+
+#### Limits
+
+The image appends an auto-detection block to `/home/coder/.bashrc`: when `ssh-add -l` gets no answer, it probes the existing `/tmp/ssh-*/agent.*` sockets newest-first and exports the first one that responds, so a new interactive shell picks up the live agent on its own. Two limits worth knowing:
+
+- **Interactive shells only.** Ubuntu's skel `.bashrc` returns early for non-interactive shells, so a bare `bash -c` never reaches the block. In practice this is fine: you start `claude` from an interactive shell and it inherits that shell's corrected `SSH_AUTH_SOCK`, which Claude's own bash commands then inherit in turn.
+- **Pre-existing tmux panes** keep the stale value, since they don't re-read `.bashrc`. Open a new window/pane, or run `source ~/.bashrc` in the old one.
+
+> An agent that *is* reachable but holds **no keys** also fails `ssh-add -l`, so the probe runs anyway — harmless, but if pushes still fail, check `ssh-add -l` on your **host** first: an empty agent needs `ssh-add ~/.ssh/id_ed25519`.
+
+---
+
 ## 7. MCP Servers
 
 The container ships with [MCP](https://modelcontextprotocol.io) servers so Claude has better tools out of the box. They're registered at **user scope** — `run.sh` writes them into the auth folder's `.claude.json` on every run — so they load in **every** project and every mode (local, `--rc`, and a manual `claude` over `--ssh`) with **no approval prompt**.
@@ -663,6 +705,8 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 | AMD GPU not visible | Group membership issue | `--gpu-amd` includes `--group-add keep-groups`; check `/dev/kfd` exists on host |
 | `claude auth login` URL doesn't open a browser | Container has no display | This is expected — copy the URL, paste it into your **host** browser |
 | VS Code keeps disconnecting | Missing SSH keepalive | `sshd_config` already sets `ClientAliveInterval 30`; check your local `~/.ssh/config` too |
+| `git push` inside the container: `Permission denied (publickey)` | No agent forwarded — the container holds no private keys by design | Reconnect with `ForwardAgent yes` / `ssh -A` — see [SSH Agent Forwarding](#ssh-agent-forwarding--git-push-with-your-host-keys). Check with `ssh-add -l` inside *and* on the host |
+| `ssh-add -l`: "Could not open a connection to your authentication agent" in a `podman exec` shell or an old tmux pane | `SSH_AUTH_SOCK` is unset (exec) or points at a closed session's socket (reconnect) | The `.bashrc` auto-detection fixes any **new** interactive shell; in an existing pane run `source ~/.bashrc`. Rebuild if the image predates the fix |
 | `--rc`: "Remote Control requires a full-scope login token" | No claude.ai login in the auth folder (e.g. you deleted it) | Run `scripts/run.sh --auth` once to save a full claude.ai login, then `scripts/run.sh --rc`. The login in `~/.codingseal/claude-auth/.credentials.json` is what Remote Control uses |
 | `--rc`: "Remote Control requires a claude.ai subscription" / "not yet enabled" | No claude.ai login, or feature not rolled out to your account | `scripts/run.sh --auth` to log in; confirm your plan supports it (Pro/Max/Team/Enterprise). On Team/Enterprise an Owner must enable the Remote Control toggle in admin settings |
 | `--rc`: no session URL appears / `claude: command not found` for `remote-control` | Image predates Remote Control (needs Claude Code v2.1.51+) | Rebuild: `podman build --pull=newer -t coding-seal:latest .` |

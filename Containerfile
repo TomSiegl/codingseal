@@ -309,6 +309,30 @@ RUN mkdir -p /run/sshd && chmod 0755 /run/sshd && \
     ssh-keygen -A && \
     install -d -m 700 -o coder -g coder /home/coder/.ssh
 
+# ── Forwarded SSH agent auto-detection (coder's .bashrc) ───────────────────
+# With `ssh -A` into the container, sshd creates a FRESH /tmp/ssh-*/agent.*
+# socket per connection and exports SSH_AUTH_SOCK for that session only. Two
+# cases leave the variable useless: a `podman exec` shell inherits nothing, and
+# a reconnect can leave an inherited/stale value pointing at a closed session's
+# socket. Both make git push over SSH fail with "Permission denied (publickey)".
+# So: if the current agent doesn't answer, probe the existing sockets
+# newest-first and adopt the first live one.
+RUN printf '%s\n' \
+    '' \
+    '# Pick up a forwarded SSH agent socket if the current one is missing or stale.' \
+    '# sshd creates a fresh /tmp/ssh-*/agent.* socket per connection when' \
+    '# ForwardAgent/-A is used, so reconnects can leave SSH_AUTH_SOCK pointing' \
+    '# at a socket from a closed session.' \
+    'if ! ssh-add -l >/dev/null 2>&1; then' \
+    '    for sock in $(ls -t /tmp/ssh-*/agent.* 2>/dev/null); do' \
+    '        if SSH_AUTH_SOCK="$sock" ssh-add -l >/dev/null 2>&1; then' \
+    '            export SSH_AUTH_SOCK="$sock"' \
+    '            break' \
+    '        fi' \
+    '    done' \
+    'fi' \
+    >> /home/coder/.bashrc
+
 # ── Claude Code config ─────────────────────────────────────────────────────
 # CLAUDE_CONFIG_DIR makes Claude store ALL of its state — settings.json,
 # .claude.json (onboarding/trust/projects), credentials, and sessions — in this
