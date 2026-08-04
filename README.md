@@ -16,6 +16,7 @@
 - VS Code Remote-SSH support — Claude's bash commands run inside the container, not on your host
 - Remote Control — expose the container to claude.ai/code and the Claude mobile app, then steer it from your phone or browser (outbound HTTPS only, no inbound port)
 - Built-in MCP servers — Context7 (up-to-date library docs) and Sequential Thinking are baked in; the GitHub MCP server turns on when you add a token
+- GitLab CLI (`glab`) with per-project auth — drop a `.glab-token` in a project and only that project's token reaches the container, so a `read_api`-scoped token stays scoped
 - Selectable project directories — only the folders you explicitly pass with `-p` are visible to Claude
 - Optional GPU passthrough — NVIDIA and AMD both supported
 
@@ -55,12 +56,13 @@
    - [Mode D: Remote Control — drive from claude.ai/code](#mode-d-remote-control--drive-from-claudeaicode)
    - [SSH Agent Forwarding — git push with your host keys](#ssh-agent-forwarding--git-push-with-your-host-keys)
 7. [MCP Servers](#7-mcp-servers)
-8. [GPU Support](#8-gpu-support)
-9. [Advanced: Sharing Host Python Packages](#9-advanced-sharing-host-python-packages)
-10. [LaTeX](#10-latex)
+8. [GitLab CLI (glab)](#8-gitlab-cli-glab)
+9. [GPU Support](#9-gpu-support)
+10. [Advanced: Sharing Host Python Packages](#10-advanced-sharing-host-python-packages)
+11. [LaTeX](#11-latex)
     - [Fonts and pandoc](#fonts-and-pandoc)
-11. [Updating the Image](#11-updating-the-image)
-12. [Troubleshooting](#12-troubleshooting)
+12. [Updating the Image](#12-updating-the-image)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
@@ -72,7 +74,7 @@
 | **Anthropic account** | [console.anthropic.com](https://console.anthropic.com) |
 | **SSH key pair** | `ls ~/.ssh/id_*.pub` — generate: `ssh-keygen -t ed25519` |
 | **VS Code** *(optional)* | With [Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh) extension |
-| **NVIDIA drivers** *(optional)* | Required only for `--gpu-nvidia` — see [Section 8](#8-gpu-support) |
+| **NVIDIA drivers** *(optional)* | Required only for `--gpu-nvidia` — see [Section 9](#9-gpu-support) |
 
 ---
 
@@ -496,7 +498,55 @@ Then ask, e.g., *"use context7 to get the current Next.js App Router docs."*
 
 ---
 
-## 8. GPU Support
+## 8. GitLab CLI (glab)
+
+The [GitLab CLI](https://gitlab.com/gitlab-org/cli) (`glab`) is baked into the image — issues, MRs, pipelines, `glab api`. What is *not* baked in is a token: **the token belongs to the project, not to the container.**
+
+That is deliberate. A token scoped to `read_api` on a single project is only useful if it stays with that project, so `run.sh` reads it out of the project you mount and hands glab exactly that one.
+
+**Set it up** — one file per project, inside the project:
+
+```bash
+echo glpat-xxxxxxxxxxxxxxxxxxxx > ~/projects/myapp/.glab-token
+chmod 600 ~/projects/myapp/.glab-token
+echo '.glab-token' >> ~/projects/myapp/.gitignore     # do not commit it
+```
+
+Then just run as usual — the token file rides along with the project's own bind-mount:
+
+```bash
+scripts/run.sh -p ~/projects/myapp
+# Starting container 'coding-seal' from image 'localhost/coding-seal:latest'...
+#   glab: token loaded from .glab-token for myapp → gitlab.example.org
+```
+
+Inside the container:
+
+```bash
+glab auth status          # ✓ Token found in configuration file
+glab mr list
+glab api projects/:id     # read_api is enough for everything read-only
+```
+
+**What `run.sh` does with the file:**
+
+1. Scans every `-p` directory for `.glab-token` (override the name with `GLAB_TOKEN_FILE`).
+2. Takes the GitLab **host** from that project's `origin` remote — SSH, `ssh://` and HTTPS remote URLs are all understood, so a self-managed instance needs no extra setup. A project with no GitLab remote falls back to `GITLAB_HOST` from your `.env`, then `gitlab.com`.
+3. Passes the resulting config to the container, where `codingseal-glab-init` writes it (mode `600`) to `/home/coder/.config/glab-cli/config.yml` before starting your command. That is glab's **default** config location, so it applies in every mode — including SSH sessions, which never see the container's environment.
+
+| Detail | Behaviour |
+|---|---|
+| **Nothing on the host** | The config exists only inside the container and dies with it. Two containers on different projects therefore never share or overwrite each other's tokens — run as many in parallel as you like. |
+| **Scope stays yours** | A container only ever holds tokens for the projects you passed it with `-p`. Nothing container-wide, nothing in `.env`, no file left behind. |
+| **One token per host** | glab stores one token per hostname. Two projects on the same instance can't both be authenticated: the first `-p` wins and `run.sh` warns about the rest. Run one project at a time, which is what per-project scoping means anyway. |
+| **Plaintext, by design** | `glab auth status` suggests moving the token into an OS keyring. There is no keyring in a container; the file is `600` in a container-private directory. |
+| **Token missing?** | Nothing breaks — glab is simply unauthenticated, and the container starts exactly as it did before. Add the file and restart. |
+
+> `glab` uses the token only for **API** calls. `git push`/`pull` still go over SSH with your forwarded agent — see [SSH Agent Forwarding](#ssh-agent-forwarding--git-push-with-your-host-keys).
+
+---
+
+## 9. GPU Support
 
 ### NVIDIA
 
@@ -554,7 +604,7 @@ scripts/run.sh -p ~/projects/myproject
 
 ---
 
-## 9. Advanced: Sharing Host Python Packages
+## 10. Advanced: Sharing Host Python Packages
 
 If you have a large Python environment on your host and want to avoid reinstalling packages in the container, mount your host's site-packages read-only.
 
@@ -580,7 +630,7 @@ Packages installed with `uv pip install` inside the container go into the contai
 
 ---
 
-## 10. LaTeX
+## 11. LaTeX
 
 TeX Live is **baked into the image**: `pdflatex`, `xelatex`, `lualatex`, `latexmk`, `biber`, `bibtex`, `makeindex`, EPS includes, `pdfcrop`, and the `dvips`/`ps2pdf` route all work out of the box.
 
@@ -650,7 +700,7 @@ The build-time smoke test covers all of this too: a `fontspec` document must com
 
 ---
 
-## 11. Updating the Image
+## 12. Updating the Image
 
 **When do you need to rebuild?**
 
@@ -670,7 +720,7 @@ podman build --build-arg PYTHON_VERSION=3.11 -t coding-seal:py311 .
 CLAUDE_IMAGE=localhost/coding-seal:py311 scripts/run.sh -p ~/projects/myproject
 ```
 
-**Custom LaTeX package set** (see [Section 10](#10-latex)):
+**Custom LaTeX package set** (see [Section 11](#11-latex)):
 ```bash
 podman build --build-arg LATEX_SCHEME=full -t coding-seal:latex-full .
 CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
@@ -682,7 +732,7 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -710,8 +760,12 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 | `--rc`: "Remote Control requires a full-scope login token" | No claude.ai login in the auth folder (e.g. you deleted it) | Run `scripts/run.sh --auth` once to save a full claude.ai login, then `scripts/run.sh --rc`. The login in `~/.codingseal/claude-auth/.credentials.json` is what Remote Control uses |
 | `--rc`: "Remote Control requires a claude.ai subscription" / "not yet enabled" | No claude.ai login, or feature not rolled out to your account | `scripts/run.sh --auth` to log in; confirm your plan supports it (Pro/Max/Team/Enterprise). On Team/Enterprise an Owner must enable the Remote Control toggle in admin settings |
 | `--rc`: no session URL appears / `claude: command not found` for `remote-control` | Image predates Remote Control (needs Claude Code v2.1.51+) | Rebuild: `podman build --pull=newer -t coding-seal:latest .` |
+| `glab`: "no token provided" / `401 Unauthorized` | No `.glab-token` in the mounted project, or the token is expired/revoked | Watch for the `glab: token loaded …` line when `run.sh` starts; inside, check `glab auth status` and `cat ~/.config/glab-cli/config.yml`. The config is built at start-up, so add the token file and restart the container |
+| `glab`: authenticated against the wrong host | The project's `origin` remote isn't the GitLab instance the token is for (or there is no remote, so `GITLAB_HOST`/`gitlab.com` was used) | Check `git -C <project> remote get-url origin`; set `GITLAB_HOST` in `.env` for a project without a GitLab remote |
+| `glab`: second project on the same instance is unauthenticated | glab stores one token per hostname — `run.sh` warns and keeps the first `-p` project's token | Intended with per-project scopes: run one project at a time, or issue one token covering both |
+| `glab`: `403 Forbidden` on a write (`glab mr create`, `glab issue note`) | The token is scoped `read_api` | Expected — `read_api` is read-only. Use a token with `api` scope if you need writes |
 | `pdflatex: command not found` | Image built with `LATEX_SCHEME=none`, or predates LaTeX support | Rebuild: `podman build -t coding-seal:latest .` |
-| `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 10](#10-latex) |
+| `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 11](#11-latex) |
 | `pdfcrop`/`texcount` not found but every `.sty` is present | Style files and executables come from *different* packages — these binaries live in `texlive-extra-utils` | Present in `curated` and `full`; add `texlive-extra-utils` if you customised the list |
 | `LaTeX Error: File 'foo.sty' not found` | The package isn't in the scheme you built | Add the owning `texlive-*` package to the `curated` list in the `Containerfile` and rebuild, or build `LATEX_SCHEME=full`. Find the owner via [packages.ubuntu.com](https://packages.ubuntu.com) |
 | `fontspec error: The font "…" cannot be found` | Only Type 1 faces present, not OpenType | `curated` and `full` install `fonts-texgyre`/`fonts-lmodern` for exactly this; `minimal` has no `fontspec` at all. Check with `podman run --rm --entrypoint fc-match coding-seal:latest "TeX Gyre Pagella"` |
@@ -727,11 +781,11 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 codingseal/
 ├── codingseal.png            ← Project logo
 ├── README.md                 ← This tutorial
-├── LATEX.md                  ← LaTeX package sets, what each scheme omits, trade-offs (§10)
-├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + sshd + tmux (tini as PID 1, no entrypoint script)
+├── LATEX.md                  ← LaTeX package sets, what each scheme omits, trade-offs (§11)
+├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + glab + sshd + tmux (tini as PID 1, no entrypoint script)
 ├── .env.example              ← Copy to .env; set SSH_PUBLIC_KEY for --ssh
 ├── scripts/
-│   └── run.sh                ← Wrapper: seeds config + runs --auth / --rc / --ssh / -p PATH / --gpu-nvidia|amd
+│   └── run.sh                ← Wrapper: seeds config (incl. glab tokens from the -p dirs) + runs --auth / --rc / --ssh / -p PATH / --gpu-nvidia|amd
 └── config/
     ├── sshd_config           ← Port 2222, key-only auth, static SetEnv CLAUDE_CONFIG_DIR, VS Code keepalive
     └── claude-settings.json  ← bypassPermissions + full allow list (seeded into the auth folder by run.sh)

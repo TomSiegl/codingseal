@@ -11,6 +11,7 @@ SETTINGS_SRC="${REPO_DIR}/config/claude-settings.json"
 # ── Defaults ──────────────────────────────────────────────────────────────
 GPU_FLAGS=()
 PROJECT_MOUNTS=()
+PROJECT_DIRS=()          # same paths as PROJECT_MOUNTS, for the glab token scan
 MODE="local"            # "local"          → interactive TTY, `claude` starts immediately
                         # "remote-control" → foreground `claude remote-control`, so
                         #                     claude.ai/code + the Claude app can drive this env
@@ -26,6 +27,11 @@ CONTAINER_NAME="${CONTAINER_NAME:-coding-seal}"
 # VS Code snap, so the login always persists. Override with CLAUDE_AUTH_DIR.
 CLAUDE_AUTH_DIR="${CLAUDE_AUTH_DIR:-${HOME}/.codingseal/claude-auth}"
 SSH_PORT="${SSH_PORT:-2222}"
+# glab (GitLab CLI): the token for a project lives IN that project, in a file
+# named GLAB_TOKEN_FILE. run.sh reads it and passes glab's config to the container,
+# which writes it at start-up — so tokens stay per-project and scoped exactly as
+# you issued them (e.g. read_api on one project), with nothing container-wide.
+GLAB_TOKEN_FILE="${GLAB_TOKEN_FILE:-.glab-token}"
 
 # Mutually exclusive mode requests (a container runs ONE command).
 want_auth=0
@@ -59,9 +65,22 @@ Authentication:
   (CLAUDE_AUTH_DIR) and reused on every run. Remote Control needs this full login —
   long-lived tokens and API keys are not supported.
 
+GitLab CLI (glab):
+  Put the project's token in a file inside the project itself:
+
+      echo glpat-xxxxxxxxxxxx > ~/projects/myapp/.glab-token   # and gitignore it
+
+  Every run scans the -p directories for that file and builds a glab config for
+  the container (host taken from the project's `origin` remote), so `glab` inside
+  is authenticated for that project only — keep the token scoped to it. The config
+  is written inside the container, never on the host, so parallel runs on
+  different projects stay independent.
+
 Environment variables (set these before running):
   SSH_PUBLIC_KEY           Public key injected into the container's authorized_keys (--ssh)
   CLAUDE_AUTH_DIR          Host dir for persistent login (default: ~/.codingseal/claude-auth)
+  GLAB_TOKEN_FILE          Token filename looked for in each -p dir (default: .glab-token)
+  GITLAB_HOST              Fallback GitLab host when a project has no `origin` remote
   SSH_PORT, CONTAINER_NAME, CLAUDE_IMAGE  Override defaults
 
 Examples:
@@ -116,6 +135,7 @@ while [[ $# -gt 0 ]]; do
             ABSPATH=$(realpath "$2")
             # :Z = private SELinux label (no-op when SELinux is disabled, correct on Fedora/RHEL)
             PROJECT_MOUNTS+=("--volume" "${ABSPATH}:${ABSPATH}:Z")
+            PROJECT_DIRS+=("${ABSPATH}")
             # Start Claude inside the FIRST project so it opens in your code,
             # not the empty /home/coder. Extra -p dirs stay accessible by path.
             [[ -z "${FIRST_PROJECT:-}" ]] && FIRST_PROJECT="${ABSPATH}"
@@ -245,6 +265,81 @@ else
     echo "      claude mcp add --scope user context7 -- npx -y @upstash/context7-mcp" >&2
 fi
 
+# ── glab: per-project GitLab tokens ───────────────────────────────────────
+# The token for a project lives IN that project: <project>/.glab-token, holding
+# nothing but the token (gitignore it). For every -p directory that has one we add
+# a `hosts:` entry to a glab config.yml — the host taken from that project's
+# `origin` remote, so a self-managed instance needs no extra configuration.
+#
+# The config is never written to the host: it is handed to the container in
+# CODINGSEAL_GLAB_CONFIG and materialised there by `codingseal-glab-init` (see the
+# Containerfile). A shared host file would make two parallel runs on different
+# projects overwrite each other's tokens; this way each container holds only the
+# tokens of the projects IT was given, and they vanish with it.
+GLAB_CONFIG_YAML=""
+GLAB_SUMMARY=()
+
+# The GitLab host from a project's `origin` remote. Three URL shapes occur:
+# scp-like (git@host:group/proj.git), ssh:// (where the port is SSH's, not the
+# API's, so it must go) and https:// (where a port IS part of the API host).
+glab_host_for() {
+    local dir="$1" url host
+    url="$(git -C "${dir}" remote get-url origin 2>/dev/null || true)"
+    case "${url}" in
+        ssh://*) host="${url#ssh://}"; host="${host#*@}"; host="${host%%/*}"; host="${host%%:*}" ;;
+        *://*)   host="${url#*://}";   host="${host#*@}"; host="${host%%/*}" ;;
+        *@*:*)   host="${url#*@}";     host="${host%%:*}" ;;
+        *)       host="" ;;
+    esac
+    # No GitLab remote (or not a repo): fall back to GITLAB_HOST from your .env,
+    # then to gitlab.com.
+    printf '%s' "${host:-${GITLAB_HOST:-gitlab.com}}"
+}
+
+if [[ ${#PROJECT_DIRS[@]} -gt 0 ]]; then
+    declare -A GLAB_HOST_SEEN=()
+    GLAB_HOSTS_YAML=""
+    for dir in "${PROJECT_DIRS[@]}"; do
+        TOKEN_FILE="${dir}/${GLAB_TOKEN_FILE}"
+        [[ -r "${TOKEN_FILE}" ]] || continue
+        # tr drops the trailing newline plus any stray whitespace or CR — a token
+        # pasted through a browser or a Windows editor otherwise fails as a 401
+        # that looks like a bad token.
+        TOKEN="$(tr -d '[:space:]' < "${TOKEN_FILE}")"
+        if [[ -z "${TOKEN}" ]]; then
+            echo "⚠️  ${TOKEN_FILE} is empty — ignoring it." >&2
+            continue
+        fi
+        GLAB_HOST="$(glab_host_for "${dir}")"
+        # config.yml holds ONE token per host, so two projects on the same
+        # instance can't both be authenticated — exactly the case per-project
+        # scoping is for. First -p wins; the rest are reported, not silently lost.
+        if [[ -n "${GLAB_HOST_SEEN[${GLAB_HOST}]:-}" ]]; then
+            echo "⚠️  $(basename "${dir}"): ${GLAB_HOST} already has the token from" \
+                 "${GLAB_HOST_SEEN[${GLAB_HOST}]} — ignoring this one." >&2
+            echo "    glab keeps one token per host; run one project at a time." >&2
+            continue
+        fi
+        GLAB_HOST_SEEN[${GLAB_HOST}]="$(basename "${dir}")"
+        # Quoted keys/values: a self-managed instance reachable on a non-default
+        # port keeps the port in the host, and an unquoted colon in a YAML key is
+        # asking for trouble.
+        GLAB_HOSTS_YAML+="  \"${GLAB_HOST}\":
+    token: \"${TOKEN}\"
+    api_host: \"${GLAB_HOST}\"
+    api_protocol: https
+"
+        GLAB_SUMMARY+=("$(basename "${dir}") → ${GLAB_HOST}")
+    done
+
+    if [[ -n "${GLAB_HOSTS_YAML}" ]]; then
+        GLAB_CONFIG_YAML="# Written at start-up by codingseal-glab-init, from each project's
+# ${GLAB_TOKEN_FILE} file. Edit those, not this — it is rebuilt on every run.
+hosts:
+${GLAB_HOSTS_YAML}"
+    fi
+fi
+
 # ── Build base flags ──────────────────────────────────────────────────────
 PODMAN_FLAGS=(
     "--name"    "${CONTAINER_NAME}"
@@ -319,8 +414,19 @@ else
     CMD=("/usr/sbin/sshd" "-D" "-e")
 fi
 
+# ── Hand the glab config to the container (no host file) ───────────────────
+# Only when a project actually shipped a token: with nothing to write, the
+# container runs its command directly, exactly as before.
+if [[ -n "${GLAB_CONFIG_YAML}" ]]; then
+    PODMAN_FLAGS+=("--env" "CODINGSEAL_GLAB_CONFIG=${GLAB_CONFIG_YAML}")
+    CMD=("codingseal-glab-init" "${CMD[@]}")
+fi
+
 # ── Print summary ─────────────────────────────────────────────────────────
 echo "Starting container '${CONTAINER_NAME}' from image '${IMAGE}'..."
+if [[ ${#GLAB_SUMMARY[@]} -gt 0 ]]; then
+    echo "  glab: token loaded from ${GLAB_TOKEN_FILE} for ${GLAB_SUMMARY[*]}"
+fi
 if [[ "${MODE}" == "auth" ]]; then
     echo ""
     echo "  A URL will appear below. Open it in your browser, complete the login,"

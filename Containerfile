@@ -301,6 +301,61 @@ RUN uv python install ${PYTHON_VERSION} && \
     ln -sf /usr/local/bin/python3 /usr/local/bin/python && \
     chmod -R a+rX /opt/uv
 
+# ── GitLab CLI (glab) ──────────────────────────────────────────────────────
+# Not in Ubuntu 24.04's archive, so take GitLab's own .deb from that release's
+# generic package registry: arch-aware, version-pinned, and checksum-verified
+# against the checksums.txt published with the same release. `dpkg -i`, not apt:
+# the package has no dependencies, so no apt lists are needed.
+#
+# No token is baked in. glab reads its tokens from ~/.config/glab-cli/config.yml,
+# and run.sh bind-mounts a host directory there, generated from the `.glab-token`
+# file found in the project you pass with -p. Because that is glab's DEFAULT
+# config location, it works in every mode — including SSH sessions, which never
+# see the container's environment (sshd drops it; see config/sshd_config).
+ARG GLAB_VERSION=1.112.0
+RUN set -eu; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "${ARCH}" in \
+      amd64|arm64) ;; \
+      *) echo "Error: no glab .deb for architecture '${ARCH}'" >&2; exit 1 ;; \
+    esac; \
+    BASE="https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/packages/generic/glab/${GLAB_VERSION}"; \
+    DEB="glab_${GLAB_VERSION}_linux_${ARCH}.deb"; \
+    cd /tmp; \
+    curl -fsSL -o "${DEB}" "${BASE}/${DEB}"; \
+    curl -fsSL -o checksums.txt "${BASE}/checksums.txt"; \
+    grep " ${DEB}\$" checksums.txt | sha256sum -c -; \
+    dpkg -i "./${DEB}"; \
+    rm -f "${DEB}" checksums.txt; \
+    echo "glab OK: $(glab --version)"
+
+# Pre-created and owned by coder: in --ssh mode the container starts as root, and
+# a root-owned /home/coder/.config would break every other tool that writes there.
+RUN install -d -o coder -g coder -m 700 /home/coder/.config /home/coder/.config/glab-cli
+
+# The glab config is materialised at start-up, in the container, by this shim:
+# run.sh prepends it to whatever command the container runs. Deliberately NOT a
+# host file — two parallel runs on different projects would overwrite each other's
+# tokens — and deliberately a file rather than a GITLAB_TOKEN in the environment,
+# because SSH sessions get none of the container's environment (sshd drops it).
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    '# codingseal-glab-init — write glab'"'"'s config, then exec the real command.' \
+    '# $CODINGSEAL_GLAB_CONFIG is built by run.sh from the .glab-token file in each' \
+    '# project passed with -p. It lives only in this container, and dies with it.' \
+    'set -eu' \
+    'if [ -n "${CODINGSEAL_GLAB_CONFIG:-}" ]; then' \
+    '    umask 077' \
+    '    mkdir -p /home/coder/.config/glab-cli' \
+    '    printf "%s" "${CODINGSEAL_GLAB_CONFIG}" > /home/coder/.config/glab-cli/config.yml' \
+    '    # --ssh starts as root (sshd needs it); every other mode is already coder.' \
+    '    if [ "$(id -u)" = 0 ]; then chown -R coder:coder /home/coder/.config/glab-cli; fi' \
+    '    unset CODINGSEAL_GLAB_CONFIG   # keep the token out of the command'"'"'s environment' \
+    'fi' \
+    'exec "$@"' \
+    > /usr/local/bin/codingseal-glab-init \
+    && chmod 0755 /usr/local/bin/codingseal-glab-init
+
 # ── SSH server setup ───────────────────────────────────────────────────────
 # Bake the host keys at build time — stable across container starts, so no
 # "host key changed" warnings — and pre-create coder's .ssh dir (mode 700). In
