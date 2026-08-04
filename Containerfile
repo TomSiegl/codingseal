@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         openssh-server \
         tini \
         procps \
+        tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # ── LaTeX (self-contained in the image) ────────────────────────────────────

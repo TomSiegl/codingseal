@@ -229,6 +229,8 @@ scripts/run.sh -p ~/projects/myproject
 
 You land directly in `claude`. Type your task. Claude's bash commands run in the container.
 
+`tmux` is installed in the image, which is mostly useful over SSH (Modes B–C): start work inside `tmux`, and a dropped connection leaves the session running — reattach with `tmux attach`. Note that it does **not** survive the container itself: `run.sh` uses `--rm`, so exiting the container discards every tmux session with it.
+
 To get a plain shell instead (bare `--userns=keep-id` runs you as the non-root `coder` user — no `--user 0`, which is only needed for the `--ssh` mode's sshd):
 ```bash
 podman run -it --rm \
@@ -544,7 +546,7 @@ Nothing is bind-mounted from the host, so **your host needs no TeX Live at all**
 
 | `LATEX_SCHEME` | Image size | Build time | Engines | Use when |
 |---|---|---|---|---|
-| `curated` **(default)** | 4.16 GB | ~19 min | pdflatex, xelatex, lualatex, latex | Ordinary documents: papers, reports, theses |
+| `curated` **(default)** | 4.19 GB | ~19 min | pdflatex, xelatex, lualatex, latex | Ordinary documents: papers, reports, theses |
 | `full` | ~8.3 GB * | ~32 min * | all of the above | You want every package Debian ships |
 | `minimal` | 1.66 GB | ~6 min | pdflatex, lualatex, latex (no xelatex) | Simple documents; no tikz, no biber |
 | `none` | 1.34 GB | ~3 min | — | You don't want LaTeX in the image |
@@ -682,7 +684,7 @@ codingseal/
 ├── codingseal.png            ← Project logo
 ├── README.md                 ← This tutorial
 ├── LATEX.md                  ← LaTeX package sets, what each scheme omits, trade-offs (§10)
-├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + sshd (tini as PID 1, no entrypoint script)
+├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + sshd + tmux (tini as PID 1, no entrypoint script)
 ├── .env.example              ← Copy to .env; set SSH_PUBLIC_KEY for --ssh
 ├── scripts/
 │   └── run.sh                ← Wrapper: seeds config + runs --auth / --rc / --ssh / -p PATH / --gpu-nvidia|amd
