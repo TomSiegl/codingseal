@@ -19,6 +19,7 @@
 - GitLab CLI (`glab`) with per-project auth — drop a `.glab-token` in a project and only that project's token reaches the container, so a `read_api`-scoped token stays scoped
 - Selectable project directories — only the folders you explicitly pass with `-p` are visible to Claude
 - Optional GPU passthrough — NVIDIA and AMD both supported
+- `--model` / `--advisor` flags — pin the session's model and pair it with a stronger advisor model at launch
 
 ---
 
@@ -63,6 +64,7 @@
     - [Fonts and pandoc](#fonts-and-pandoc)
 12. [Updating the Image](#12-updating-the-image)
 13. [Troubleshooting](#13-troubleshooting)
+14. [Selecting a Model & Advisor](#14-selecting-a-model--advisor)
 
 ---
 
@@ -129,8 +131,21 @@ Claude Code normally prompts before every file write, shell command, and web req
 |---|---|
 | Read files outside `-p` mounts | Not mounted |
 | Access other users' data | User-namespace isolation |
-| Persist changes outside project mounts and the auth volume | `--rm` removes the container on exit |
+| Touch anything on the **host** outside project mounts and the auth volume | Only mounted paths are shared; the rest of the container's filesystem is a separate namespace regardless of container lifecycle |
 | Reach the host's running processes | PID namespace is separate |
+
+### Container lifecycle (containers are no longer auto-removed)
+
+`run.sh` intentionally does **not** pass `--rm` to `podman run`. When a container exits (you quit `claude`, or `podman stop`), it stays around in an **Exited** state instead of being deleted — so you can resume the same container (keeping anything Claude installed or wrote outside the mounted project/auth volumes, e.g. `apt-get`/`pip` packages) or inspect its logs after a crash, rather than always starting completely fresh.
+
+```bash
+podman ps -a                    # exited containers are still listed
+podman start -ai coding-seal    # resume the same container, re-attaching your terminal
+podman logs coding-seal         # read output from a container that already exited
+podman rm coding-seal           # fully delete it (only then does a fresh `run.sh` start clean)
+```
+
+**Gotcha:** because the container isn't deleted, running `scripts/run.sh` again with the same `--name` (the default is always `coding-seal`) after a previous session exited will fail — see [Troubleshooting](#13-troubleshooting). Either `podman start -ai coding-seal` to resume it, or `podman rm coding-seal` first to start clean.
 
 ---
 
@@ -775,6 +790,30 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 | `…-eps-converted-to.pdf not found` on `\includegraphics{x.eps}` | Ghostscript or `repstopdf` missing | All schemes except `none` install `ghostscript`; verify with `podman run --rm --entrypoint gs coding-seal:latest --version` |
 | Build fails at `pdflatex smoke test FAILED` | The chosen `LATEX_SCHEME` is genuinely broken | This is the build-time guard doing its job — the failing `pdflatex` log is printed above the error |
 | Image is much bigger than expected | `LATEX_SCHEME=full` adds ~7.4 GB (incl. 2.3 GB of manuals it cannot drop) | Use the default `curated` (~2.9 GB) or `none`; check with `podman images` |
+| `Error: creating container storage: the container name "coding-seal" is already in use by ... You have to remove that container to be able to reuse that name` | Containers aren't auto-removed on exit (no `--rm` — see [Container lifecycle](#container-lifecycle-containers-are-no-longer-auto-removed)); a previous session's exited container still holds the name | Resume it: `podman start -ai coding-seal` — or delete it first: `podman rm coding-seal`, then re-run `scripts/run.sh` |
+
+---
+
+## 14. Selecting a Model & Advisor
+
+`run.sh` can pin the session's model and, optionally, pair it with a stronger **advisor model** that Claude consults mid-task (before committing to an approach, on a recurring error, or before declaring a task done) — both are passed straight through to the real `claude --model` / `claude --advisor` flags.
+
+```bash
+scripts/run.sh -p ~/projects/myproject --model sonnet              # pin the model
+scripts/run.sh -p ~/projects/myproject --model sonnet --advisor    # + advisor, defaults to opus
+scripts/run.sh -p ~/projects/myproject --model haiku --advisor opus  # explicit advisor override
+```
+
+Only applies to `local` sessions and `--rc`/`--remote-control`; it's ignored (with a warning) for `--auth` and `--ssh`, since neither actually starts a `claude` session for the flag to attach to.
+
+**`--model VALUE`** — accepts `sonnet`, `opus`, `haiku`, `fable`, `default`, `best`, `opusplan`, `sonnet[1m]`, `opus[1m]`, or a full model ID (`claude-sonnet-5`). Casual forms like `sonnet5`/`opus5` are normalized automatically to what `claude` actually accepts.
+
+**`--advisor [VALUE]`** — bare `--advisor` defaults to `opus`; `--advisor VALUE` overrides (`opus`, `sonnet`, `fable`, or a full model ID). The advisor is an [experimental Claude Code feature](https://code.claude.com/docs/en/advisor.md):
+
+- Requires the **Anthropic API** — not available on Bedrock, Claude Platform on AWS, Google Cloud's Agent Platform, or Microsoft Foundry.
+- The advisor must be at least as capable as the main model (e.g. a `sonnet` main can pair with `opus`/`sonnet`, but not a weaker model) — `claude` itself validates this and errors if the pairing isn't accepted; `run.sh` doesn't duplicate that check.
+- `fable` is currently rejected as an advisor value pending an Anthropic rollout (it works fine as the *main* `--model`) — `run.sh` prints a heads-up but still passes it through.
+- Once running, change it mid-session with `/advisor <model>` or `/advisor off`, or see `/advisor` for the full picker.
 
 ---
 
@@ -788,7 +827,9 @@ codingseal/
 ├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + glab + sshd + tmux + lazygit (tini as PID 1, no entrypoint script)
 ├── .env.example              ← Copy to .env; set SSH_PUBLIC_KEY for --ssh
 ├── scripts/
-│   └── run.sh                ← Wrapper: seeds config (incl. glab tokens from the -p dirs) + runs --auth / --rc / --ssh / -p PATH / --gpu-nvidia|amd
+│   └── run.sh                ← Wrapper: seeds config (incl. glab tokens from the -p dirs) + runs --auth / --rc /
+│                                --ssh / -p PATH / --gpu-nvidia|amd / --model / --advisor. No --rm: containers
+│                                persist (Exited) after exit — see Section 3, "Container lifecycle"
 └── config/
     ├── sshd_config           ← Port 2222, key-only auth, static SetEnv CLAUDE_CONFIG_DIR, VS Code keepalive
     └── claude-settings.json  ← bypassPermissions + full allow list (seeded into the auth folder by run.sh)

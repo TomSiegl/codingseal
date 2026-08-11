@@ -12,6 +12,8 @@ SETTINGS_SRC="${REPO_DIR}/config/claude-settings.json"
 GPU_FLAGS=()
 PROJECT_MOUNTS=()
 PROJECT_DIRS=()          # same paths as PROJECT_MOUNTS, for the glab token scan
+MODEL=""                # --model VALUE, resolved; empty = claude's own default
+ADVISOR=""              # --advisor [VALUE], resolved; "opus" if passed bare
 MODE="local"            # "local"          → interactive TTY, `claude` starts immediately
                         # "remote-control" → foreground `claude remote-control`, so
                         #                     claude.ai/code + the Claude app can drive this env
@@ -50,6 +52,13 @@ Options:
   --gpu-amd             Pass through AMD GPU via /dev/kfd and /dev/dri
   --no-gpu              Run without GPU (default)
   -p, --project PATH    Bind-mount a project directory (repeatable)
+  --model VALUE          Model for local/--rc sessions: sonnet, opus, haiku, fable,
+                        default, best, opusplan, sonnet[1m], opus[1m], or a full
+                        model ID (e.g. claude-sonnet-5). sonnet5/opus5 etc. are
+                        normalized automatically.
+  --advisor [VALUE]      Pair a stronger advisor model (local/--rc sessions).
+                        Bare --advisor defaults to opus; --advisor VALUE overrides
+                        (opus, sonnet, fable, or a full model ID).
   --remote-control, --rc
                         Remote Control: run `claude remote-control` (detached, in the
                         background) so claude.ai/code and the Claude mobile app can
@@ -104,8 +113,31 @@ Examples:
 
   # With NVIDIA GPU
   scripts/run.sh --gpu-nvidia -p ~/projects/ml
+
+  # Pin the model and pair it with an opus advisor
+  scripts/run.sh -p ~/projects/myapp --model sonnet --advisor
 EOF
     exit 0
+}
+
+# ── Alias resolution for --model / --advisor ────────────────────────────────
+# Both flags accept the same casual short forms and normalize them to exactly
+# what `claude --model` / `claude --advisor` accept: the short aliases
+# (sonnet, opus, haiku, fable, default, best, opusplan, sonnet[1m], opus[1m])
+# or a full model ID (claude-...). Prints the resolved value on success;
+# returns 1 if the input isn't recognized.
+resolve_model_alias() {
+    local raw="$1"
+    case "$raw" in
+        sonnet|sonnet5|sonnet-5)   echo "sonnet" ;;
+        opus|opus5|opus-5)         echo "opus" ;;
+        haiku|haiku5|haiku-5)      echo "haiku" ;;
+        fable|fable5|fable-5)      echo "fable" ;;
+        default|best|opusplan)     echo "$raw" ;;
+        'sonnet[1m]'|'opus[1m]')   echo "$raw" ;;
+        claude-*)                  echo "$raw" ;;
+        *) return 1 ;;
+    esac
 }
 
 # ── Argument parsing ──────────────────────────────────────────────────────
@@ -158,6 +190,26 @@ while [[ $# -gt 0 ]]; do
         --image)
             IMAGE="$2"
             shift 2 ;;
+        --model)
+            [[ -z "${2:-}" ]] && { echo "Error: --model requires a value (sonnet, opus, haiku, fable, default, best, opusplan, sonnet[1m], opus[1m], or a full model ID like claude-sonnet-5)" >&2; exit 1; }
+            MODEL="$(resolve_model_alias "$2")" || {
+                echo "Error: unrecognized --model value '$2'." >&2
+                exit 1
+            }
+            shift 2 ;;
+        --advisor)
+            if [[ -n "${2:-}" && "$2" != -* ]]; then
+                ADVISOR="$(resolve_model_alias "$2")" || {
+                    echo "Error: unrecognized --advisor value '$2'." >&2
+                    exit 1
+                }
+                shift 2
+            else
+                ADVISOR="opus"
+                shift
+            fi
+            [[ "${ADVISOR}" == "fable" ]] && echo "⚠️  --advisor fable is currently rejected by claude (rollout not yet enabled) — this may fail inside the container." >&2
+            ;;
         -h|--help) usage ;;
         *) echo "Unknown option: $1" >&2; usage ;;
     esac
@@ -182,6 +234,16 @@ fi
 (( want_auth )) && MODE="auth"
 (( want_rc ))   && MODE="remote-control"
 (( want_ssh ))  && MODE="ssh"
+
+# --model/--advisor only make sense where `claude` is actually invoked with a
+# session: local and --rc. --auth runs `claude auth login`, and --ssh never
+# invokes claude at all (you run it yourself after SSHing in).
+if [[ -n "${MODEL}" || -n "${ADVISOR}" ]]; then
+    case "${MODE}" in
+        auth) echo "⚠️  --model/--advisor are ignored with --auth ('claude auth login' doesn't take them)." >&2 ;;
+        ssh)  echo "⚠️  --model/--advisor are ignored with --ssh (this mode never invokes claude — pass them yourself when you run 'claude' after SSHing in)." >&2 ;;
+    esac
+fi
 
 # Fail fast on missing prerequisites before touching the auth dir.
 if [[ "${MODE}" == "ssh" && -z "${SSH_PUBLIC_KEY:-}" ]]; then
@@ -343,7 +405,10 @@ fi
 # ── Build base flags ──────────────────────────────────────────────────────
 PODMAN_FLAGS=(
     "--name"    "${CONTAINER_NAME}"
-    "--rm"
+#    "--rm"
+    # Containers are no longer auto-removed on exit (see README "Container
+    # lifecycle") — resume with `podman start -ai`, or `podman rm` to start clean.
+    #
     # Map your host user onto the container's `coder` user (uid/gid 1000) so
     # bind-mounted project files stay owned by you and the seeded config dir is
     # writable. The explicit uid=/gid= is REQUIRED: bare keep-id passes your host
@@ -379,6 +444,8 @@ fi
 if [[ "${MODE}" == "local" ]]; then
     PODMAN_FLAGS+=("--tty" "--interactive")
     CMD=("claude")
+    [[ -n "${MODEL}" ]]   && CMD+=("--model" "${MODEL}")
+    [[ -n "${ADVISOR}" ]] && CMD+=("--advisor" "${ADVISOR}")
 elif [[ "${MODE}" == "auth" ]]; then
     PODMAN_FLAGS+=("--tty" "--interactive")
     CMD=("claude" "auth" "login")
@@ -395,7 +462,10 @@ elif [[ "${MODE}" == "remote-control" ]]; then
     RC_NAME="${CONTAINER_NAME}"
     [[ -n "${FIRST_PROJECT:-}" ]] && RC_NAME="$(basename -- "${FIRST_PROJECT}")"
     PODMAN_FLAGS+=("--detach")
-    CMD=("claude" "remote-control" "--spawn" "same-dir" "--name" "${RC_NAME}")
+    CMD=("claude")
+    [[ -n "${MODEL}" ]]   && CMD+=("--model" "${MODEL}")
+    [[ -n "${ADVISOR}" ]] && CMD+=("--advisor" "${ADVISOR}")
+    CMD+=("remote-control" "--spawn" "same-dir" "--name" "${RC_NAME}")
 else
     # MODE == "ssh": detached, container stays running; you SSH in (as coder,
     # with your own key) and start claude. sshd needs root, so override keep-id's
