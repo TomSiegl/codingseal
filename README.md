@@ -17,6 +17,7 @@
 - Remote Control — expose the container to claude.ai/code and the Claude mobile app, then steer it from your phone or browser (outbound HTTPS only, no inbound port)
 - Built-in MCP servers — Context7 (up-to-date library docs) and Sequential Thinking are baked in; the GitHub MCP server turns on when you add a token
 - GitLab CLI (`glab`) with per-project auth — drop a `.glab-token` in a project and only that project's token reaches the container, so a `read_api`-scoped token stays scoped
+- Optional 9router — with `--9router`, a local AI router runs alongside Claude and serves its model requests from a provider you connect in its dashboard instead of Anthropic; off unless you ask for it
 - Selectable project directories — only the folders you explicitly pass with `-p` are visible to Claude
 - Optional GPU passthrough — NVIDIA and AMD both supported
 
@@ -57,12 +58,13 @@
    - [SSH Agent Forwarding — git push with your host keys](#ssh-agent-forwarding--git-push-with-your-host-keys)
 7. [MCP Servers](#7-mcp-servers)
 8. [GitLab CLI (glab)](#8-gitlab-cli-glab)
-9. [GPU Support](#9-gpu-support)
-10. [Advanced: Sharing Host Python Packages](#10-advanced-sharing-host-python-packages)
-11. [LaTeX](#11-latex)
+9. [9router — route Claude through another provider](#9-9router--route-claude-through-another-provider)
+10. [GPU Support](#10-gpu-support)
+11. [Advanced: Sharing Host Python Packages](#11-advanced-sharing-host-python-packages)
+12. [LaTeX](#12-latex)
     - [Fonts and pandoc](#fonts-and-pandoc)
-12. [Updating the Image](#12-updating-the-image)
-13. [Troubleshooting](#13-troubleshooting)
+13. [Updating the Image](#13-updating-the-image)
+14. [Troubleshooting](#14-troubleshooting)
 
 ---
 
@@ -74,7 +76,7 @@
 | **Anthropic account** | [console.anthropic.com](https://console.anthropic.com) |
 | **SSH key pair** | `ls ~/.ssh/id_*.pub` — generate: `ssh-keygen -t ed25519` |
 | **VS Code** *(optional)* | With [Remote - SSH](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-ssh) extension |
-| **NVIDIA drivers** *(optional)* | Required only for `--gpu-nvidia` — see [Section 9](#9-gpu-support) |
+| **NVIDIA drivers** *(optional)* | Required only for `--gpu-nvidia` — see [Section 10](#10-gpu-support) |
 
 ---
 
@@ -548,7 +550,70 @@ glab api projects/:id     # read_api is enough for everything read-only
 
 ---
 
-## 9. GPU Support
+## 9. 9router — route Claude through another provider
+
+[9router](https://github.com/decolua/9router) (MIT) is a local AI router: it exposes an Anthropic-compatible `/v1/messages` endpoint and forwards each request to whichever provider you connect in its dashboard. It is baked into the image but **off unless you ask for it** — the flag redirects every model request Claude makes.
+
+```bash
+scripts/run.sh --9router -p ~/projects/myapp
+```
+
+That starts the router inside the container, publishes its dashboard on **http://localhost:20128**, and — once you give it an API key — points Claude Code at it.
+
+Claude Code treats this as an ordinary [LLM gateway](https://code.claude.com/docs/en/llm-gateway): `run.sh` writes `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` into the `env` block of the Claude settings it already seeds. Nothing here is a Claude Code fork or patch.
+
+### First run
+
+There is no API key to configure yet — you create it in the dashboard this run is about to start. So run it empty:
+
+```bash
+scripts/run.sh --9router -p ~/projects/myapp
+```
+
+Without `NINEROUTER_API_KEY`, `run.sh` starts **only** the router and leaves Claude on your normal claude.ai login, so the session is still usable while you set the router up. Then:
+
+1. Open <http://localhost:20128> and log in — first-login password `123456` unless you set `NINEROUTER_PASSWORD`. Change it in the dashboard afterwards.
+2. Connect a provider.
+3. Create an API key.
+4. Put the key and a model id in `.env`:
+
+   ```bash
+   NINEROUTER_API_KEY=sk-...
+   NINEROUTER_MODEL=kr/claude-sonnet-4.5     # 9router's id, not Anthropic's
+   ```
+
+5. Re-run with `--9router`. Claude now goes through the router.
+
+### Choosing a model
+
+**Set `NINEROUTER_MODEL`.** Claude Code otherwise asks for Anthropic's own ids (`claude-opus-5` and friends), which 9router serves only if you aliased them — otherwise every request 404s. `run.sh` pins the model into all three `/model` picker slots so switching model can't land on an unrouted id, and points Claude's cheap background work (session titles and the like) at `NINEROUTER_SMALL_MODEL`, defaulting to the same model.
+
+It also enables Claude Code's gateway model discovery, so `/model` lists what the router actually serves. If a pinned id isn't one Claude Code recognises, features such as effort levels or extended thinking can stay switched off on it; Claude Code's [`ANTHROPIC_DEFAULT_*_MODEL_SUPPORTED_CAPABILITIES`](https://code.claude.com/docs/en/model-config) variables are how you declare what it supports.
+
+### What goes where
+
+| Thing | Where it lives |
+|---|---|
+| Providers, their OAuth tokens, issued API keys, routing rules | 9router's SQLite DB in `~/.codingseal/9router` on the host (`NINEROUTER_DATA_DIR`). Bind-mounted, because the container runs `--rm` — without it you'd reconnect providers on every run. |
+| The key Claude authenticates with | `NINEROUTER_API_KEY` in your `.env` → the `env` block of the seeded `settings.json` (mode `600`). |
+| The router process | Started by `codingseal-9router-init`, which waits for it to answer before handing over to Claude. Its log is `~/.codingseal/9router/server.log`. |
+| The dashboard | Published to `127.0.0.1:20128` only. Inside the container 9router binds `0.0.0.0` (podman's port forwarding connects to the container's address, not its loopback), so the host-side bind is what keeps it off the network. |
+
+### Limits and trade-offs
+
+| Detail | Behaviour |
+|---|---|
+| **Not compatible with `--remote-control`** | `run.sh` refuses the combination. Claude Code disables Remote Control whenever a gateway credential *or* a non-Anthropic `ANTHROPIC_BASE_URL` is active, and `--9router` sets both. Use it with the default mode or `--ssh`. |
+| **`--auth` ignores it** | `--auth` logs in to claude.ai, which is exactly what a router credential replaces. `run.sh` says so and skips the router for that run. |
+| **Your subscription goes unused** | While the gateway credential is set, Claude Code doesn't use your claude.ai login and its limits don't apply. Whoever owns the provider account behind the router pays instead. |
+| **Reverting is just dropping the flag** | `settings.json` is re-copied from `config/` on every run, so a run without `--9router` has no `env` block and Claude talks to Anthropic again. Your claude.ai login was never touched. |
+| **Voice dictation is unavailable** | Like Remote Control, it needs a claude.ai identity. |
+| **Version-pinned** | `NINEROUTER_VERSION` in the `Containerfile` (build-arg). The router is started with `--skip-update` so it never self-updates behind your back; bump the arg and rebuild instead. |
+| **Third-party software** | 9router is not from Anthropic, and Anthropic doesn't endorse, maintain, or audit third-party gateways. Provider credentials you connect live in the router's database on your host. |
+
+---
+
+## 10. GPU Support
 
 ### NVIDIA
 
@@ -606,7 +671,7 @@ scripts/run.sh -p ~/projects/myproject
 
 ---
 
-## 10. Advanced: Sharing Host Python Packages
+## 11. Advanced: Sharing Host Python Packages
 
 If you have a large Python environment on your host and want to avoid reinstalling packages in the container, mount your host's site-packages read-only.
 
@@ -632,7 +697,7 @@ Packages installed with `uv pip install` inside the container go into the contai
 
 ---
 
-## 11. LaTeX
+## 12. LaTeX
 
 TeX Live is **baked into the image**: `pdflatex`, `xelatex`, `lualatex`, `latexmk`, `biber`, `bibtex`, `makeindex`, EPS includes, `pdfcrop`, and the `dvips`/`ps2pdf` route all work out of the box.
 
@@ -702,7 +767,7 @@ The build-time smoke test covers all of this too: a `fontspec` document must com
 
 ---
 
-## 12. Updating the Image
+## 13. Updating the Image
 
 **When do you need to rebuild?**
 
@@ -722,7 +787,7 @@ podman build --build-arg PYTHON_VERSION=3.11 -t coding-seal:py311 .
 CLAUDE_IMAGE=localhost/coding-seal:py311 scripts/run.sh -p ~/projects/myproject
 ```
 
-**Custom LaTeX package set** (see [Section 11](#11-latex)):
+**Custom LaTeX package set** (see [Section 12](#12-latex)):
 ```bash
 podman build --build-arg LATEX_SCHEME=full -t coding-seal:latex-full .
 CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
@@ -734,7 +799,7 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -766,9 +831,14 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 | `glab`: authenticated against the wrong host | The project's `origin` remote isn't the GitLab instance the token is for (or there is no remote, so `GITLAB_HOST`/`gitlab.com` was used) | Check `git -C <project> remote get-url origin`; set `GITLAB_HOST` in `.env` for a project without a GitLab remote |
 | `glab`: second project on the same instance is unauthenticated | glab stores one token per hostname — `run.sh` warns and keeps the first `-p` project's token | Intended with per-project scopes: run one project at a time, or issue one token covering both |
 | `glab`: `403 Forbidden` on a write (`glab mr create`, `glab issue note`) | The token is scoped `read_api` | Expected — `read_api` is read-only. Use a token with `api` scope if you need writes |
+| `--9router`: Claude still talks to Anthropic | `NINEROUTER_API_KEY` isn't set, so `run.sh` only started the router (by design — on the first run the key doesn't exist yet) | Watch the `9router:` block `run.sh` prints. Create a key at <http://localhost:20128>, put it in `.env`, re-run. Verify inside with `/status` — it should name `ANTHROPIC_AUTH_TOKEN`, not a claude.ai account |
+| `--9router`: every request 404s or "model not found" | `NINEROUTER_MODEL` isn't set, so Claude asks for Anthropic ids the router doesn't serve | Set `NINEROUTER_MODEL` to one of 9router's ids (e.g. `kr/claude-sonnet-4.5`), or alias the Anthropic ids in the dashboard. `/model` lists what the router actually serves |
+| `--9router`: "9router did not answer on port 20128 within 90s" | The router failed to start | `podman exec coding-seal cat /home/coder/.9router/server.log`. A stale `~/.codingseal/9router` from a failed run is worth ruling out |
+| `--9router` refused together with `--remote-control` | Not a bug — Claude Code disables Remote Control while a gateway credential or non-Anthropic base URL is active | Use `--9router` with the default mode or `--ssh`; use `--rc` without it |
+| `9router: command not found` | Image predates 9router | Rebuild: `podman build -t coding-seal:latest .` (pin another release with `--build-arg NINEROUTER_VERSION=0.5.75`) |
 | `pdflatex: command not found` | Image built with `LATEX_SCHEME=none`, or predates LaTeX support | Rebuild: `podman build -t coding-seal:latest .` |
 | `lazygit: command not found` | Image predates lazygit | Rebuild: `podman build -t coding-seal:latest .` (pin another release with `--build-arg LAZYGIT_VERSION=0.64.0`) |
-| `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 11](#11-latex) |
+| `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 12](#12-latex) |
 | `pdfcrop`/`texcount` not found but every `.sty` is present | Style files and executables come from *different* packages — these binaries live in `texlive-extra-utils` | Present in `curated` and `full`; add `texlive-extra-utils` if you customised the list |
 | `LaTeX Error: File 'foo.sty' not found` | The package isn't in the scheme you built | Add the owning `texlive-*` package to the `curated` list in the `Containerfile` and rebuild, or build `LATEX_SCHEME=full`. Find the owner via [packages.ubuntu.com](https://packages.ubuntu.com) |
 | `fontspec error: The font "…" cannot be found` | Only Type 1 faces present, not OpenType | `curated` and `full` install `fonts-texgyre`/`fonts-lmodern` for exactly this; `minimal` has no `fontspec` at all. Check with `podman run --rm --entrypoint fc-match coding-seal:latest "TeX Gyre Pagella"` |
@@ -784,11 +854,11 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 codingseal/
 ├── codingseal.png            ← Project logo
 ├── README.md                 ← This tutorial
-├── LATEX.md                  ← LaTeX package sets, what each scheme omits, trade-offs (§11)
-├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + glab + sshd + tmux + lazygit (tini as PID 1, no entrypoint script)
+├── LATEX.md                  ← LaTeX package sets, what each scheme omits, trade-offs (§12)
+├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + glab + sshd + tmux + lazygit + 9router (tini as PID 1, no entrypoint script)
 ├── .env.example              ← Copy to .env; set SSH_PUBLIC_KEY for --ssh
 ├── scripts/
-│   └── run.sh                ← Wrapper: seeds config (incl. glab tokens from the -p dirs) + runs --auth / --rc / --ssh / -p PATH / --gpu-nvidia|amd
+│   └── run.sh                ← Wrapper: seeds config (incl. glab tokens from the -p dirs and, with --9router, Claude's gateway env) + runs --auth / --rc / --ssh / --9router / -p PATH / --gpu-nvidia|amd
 └── config/
     ├── sshd_config           ← Port 2222, key-only auth, static SetEnv CLAUDE_CONFIG_DIR, VS Code keepalive
     └── claude-settings.json  ← bypassPermissions + full allow list (seeded into the auth folder by run.sh)

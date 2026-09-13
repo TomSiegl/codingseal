@@ -33,10 +33,39 @@ SSH_PORT="${SSH_PORT:-2222}"
 # you issued them (e.g. read_api on one project), with nothing container-wide.
 GLAB_TOKEN_FILE="${GLAB_TOKEN_FILE:-.glab-token}"
 
+# ── 9router (https://github.com/decolua/9router) ──────────────────────────
+# OPT-IN. With --9router the container starts 9router next to Claude and points
+# Claude Code at it — ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN, exactly the way
+# Claude Code talks to any LLM gateway. Every model request then goes to whatever
+# provider you connected in 9router's dashboard instead of to Anthropic, so this
+# is off unless you ask for it: it redirects ALL of your inference.
+NINEROUTER_PORT="${NINEROUTER_PORT:-20128}"
+# The router's state — connected providers and their OAuth tokens, the API keys
+# it issues, the routing rules. A fixed HOST directory for the same reason
+# CLAUDE_AUTH_DIR is one: the container runs --rm, so anything that isn't
+# bind-mounted is gone the moment you quit, and you would be reconnecting
+# providers by hand on every run.
+NINEROUTER_DATA_DIR="${NINEROUTER_DATA_DIR:-${HOME}/.codingseal/9router}"
+# The key Claude authenticates to the router with. You create it in the
+# dashboard on the first run (there is nothing to set before that exists) and
+# then put it in .env; see the bootstrap notice printed below.
+NINEROUTER_API_KEY="${NINEROUTER_API_KEY:-}"
+# Model id to request, in 9router's own namespace (e.g. kr/claude-sonnet-4.5).
+# Claude Code otherwise asks for Anthropic's model ids, which only work if the
+# router has an alias for them.
+NINEROUTER_MODEL="${NINEROUTER_MODEL:-}"
+# Model for Claude's cheap background work (session titles and similar).
+# Defaults to NINEROUTER_MODEL so those calls can't 404 on an unrouted id.
+NINEROUTER_SMALL_MODEL="${NINEROUTER_SMALL_MODEL:-}"
+# First-login password for the dashboard. 9router's own default is 123456.
+NINEROUTER_PASSWORD="${NINEROUTER_PASSWORD:-}"
+
 # Mutually exclusive mode requests (a container runs ONE command).
 want_auth=0
 want_rc=0
 want_ssh=0
+# Not a mode — an add-on that composes with local and --ssh.
+want_9router=0
 
 # ── Help ──────────────────────────────────────────────────────────────────
 usage() {
@@ -56,6 +85,9 @@ Options:
                         drive this environment; get the URL via `podman logs`
   --ssh                 Headless: container stays running for SSH / VS Code Remote-SSH
   --port PORT           SSH port on localhost, used by --ssh (default: 2222)
+  --9router             Start 9router in the container and route Claude's model
+                        requests through it instead of to Anthropic (see below)
+  --9router-port PORT   Host port for the 9router dashboard (default: 20128)
   --name NAME           Container name (default: coding-seal)
   --image IMAGE         Image to use (default: localhost/coding-seal:latest)
   -h, --help            Show this help
@@ -76,11 +108,41 @@ GitLab CLI (glab):
   is written inside the container, never on the host, so parallel runs on
   different projects stay independent.
 
+9router (--9router):
+  9router is a local AI router. Started with --9router it runs inside the
+  container and Claude Code is pointed at it, so model requests go to a provider
+  you connected in 9router's dashboard rather than to Anthropic. Its dashboard is
+  published on http://localhost:20128 (loopback only).
+
+  First run — there is no API key to configure yet, so start it empty:
+
+      scripts/run.sh --9router -p ~/projects/myapp
+
+  Open http://localhost:20128, connect a provider, create an API key, then put
+  that key and a model id in .env and run again:
+
+      NINEROUTER_API_KEY=sk-...
+      NINEROUTER_MODEL=kr/claude-sonnet-4.5     # 9router's id, not Anthropic's
+
+  Until NINEROUTER_API_KEY is set, Claude keeps using your normal claude.ai
+  login and only the router is started — so the first run is still a usable
+  session. The router's state lives in ~/.codingseal/9router on the host.
+
+  --9router cannot be combined with --remote-control: Claude Code disables
+  Remote Control whenever a gateway credential or a non-Anthropic base URL is
+  active. Use --9router with the default mode or with --ssh.
+
 Environment variables (set these before running):
   SSH_PUBLIC_KEY           Public key injected into the container's authorized_keys (--ssh)
   CLAUDE_AUTH_DIR          Host dir for persistent login (default: ~/.codingseal/claude-auth)
   GLAB_TOKEN_FILE          Token filename looked for in each -p dir (default: .glab-token)
   GITLAB_HOST              Fallback GitLab host when a project has no `origin` remote
+  NINEROUTER_API_KEY       9router API key Claude authenticates with (--9router)
+  NINEROUTER_MODEL         Model id to request from 9router, in its namespace
+  NINEROUTER_SMALL_MODEL   Model for Claude's background tasks (default: NINEROUTER_MODEL)
+  NINEROUTER_PASSWORD      First-login password for the dashboard (9router default: 123456)
+  NINEROUTER_DATA_DIR      Host dir for 9router's database (default: ~/.codingseal/9router)
+  NINEROUTER_PORT          Dashboard/API port (default: 20128)
   SSH_PORT, CONTAINER_NAME, CLAUDE_IMAGE  Override defaults
 
 Examples:
@@ -104,6 +166,9 @@ Examples:
 
   # With NVIDIA GPU
   scripts/run.sh --gpu-nvidia -p ~/projects/ml
+
+  # Route Claude through 9router (dashboard on http://localhost:20128)
+  scripts/run.sh --9router -p ~/projects/myapp
 EOF
     exit 0
 }
@@ -149,6 +214,13 @@ while [[ $# -gt 0 ]]; do
         --ssh)
             want_ssh=1
             shift ;;
+        --9router)
+            want_9router=1
+            shift ;;
+        --9router-port)
+            [[ -z "${2:-}" ]] && { echo "Error: --9router-port requires a port" >&2; exit 1; }
+            NINEROUTER_PORT="$2"
+            shift 2 ;;
         --port)
             SSH_PORT="$2"
             shift 2 ;;
@@ -183,6 +255,26 @@ fi
 (( want_rc ))   && MODE="remote-control"
 (( want_ssh ))  && MODE="ssh"
 
+# --9router is an add-on, not a mode, but it does not compose with every mode.
+#
+# Remote Control needs a claude.ai identity to pair the session with your
+# account, and Claude Code disables it outright when a gateway credential is
+# active OR when ANTHROPIC_BASE_URL points somewhere that isn't Anthropic —
+# which --9router does both of. The combination would start, then fail to pair.
+if (( want_9router && want_rc )); then
+    echo "Error: --9router and --remote-control can't be combined." >&2
+    echo "  Claude Code disables Remote Control while a gateway credential or a" >&2
+    echo "  non-Anthropic ANTHROPIC_BASE_URL is active, which --9router sets." >&2
+    echo "  Use --9router on its own, or with --ssh." >&2
+    exit 1
+fi
+# --auth logs in to claude.ai. That login is exactly what a router credential
+# replaces, so starting the router here would only slow the login down.
+if (( want_9router && want_auth )); then
+    echo "ℹ️  --auth logs in to claude.ai; skipping 9router for this run." >&2
+    want_9router=0
+fi
+
 # Fail fast on missing prerequisites before touching the auth dir.
 if [[ "${MODE}" == "ssh" && -z "${SSH_PUBLIC_KEY:-}" ]]; then
     echo "Error: --ssh needs SSH_PUBLIC_KEY set (your ~/.ssh/id_ed25519.pub contents)." >&2
@@ -206,6 +298,70 @@ cp "${SETTINGS_SRC}" "${CLAUDE_AUTH_DIR}/settings.json"
 if [[ ! -f "${CLAUDE_AUTH_DIR}/.claude.json" ]]; then
     printf '%s\n' '{"hasCompletedOnboarding":true,"projects":{"/":{"hasTrustDialogAccepted":true}}}' \
         > "${CLAUDE_AUTH_DIR}/.claude.json"
+fi
+
+# ── Point Claude Code at 9router (settings.json `env` block) ───────────────
+# Claude Code reads `env` from settings.json and applies it to every session, in
+# every mode. That is what makes this work over SSH too: sshd drops the
+# container's environment (see config/sshd_config), so passing these as podman
+# --env would reach `claude` in the default mode and silently not in --ssh.
+#
+# Written here rather than into config/claude-settings.json because it is
+# per-run state: the key comes from your .env, and a run without --9router must
+# leave no trace of it behind (settings.json is re-copied from config/ above on
+# every run, so dropping the flag really does revert Claude to Anthropic).
+#
+#   ANTHROPIC_BASE_URL    where to send /v1/messages. 127.0.0.1, not localhost:
+#                         localhost can resolve to ::1 first while the router
+#                         listens on IPv4.
+#   ANTHROPIC_AUTH_TOKEN  sent as `Authorization: Bearer`, which is the header
+#                         9router reads. It takes precedence over a saved
+#                         claude.ai login immediately and with no prompt —
+#                         ANTHROPIC_API_KEY would need interactive approval and
+#                         so would hang a headless run.
+#   ANTHROPIC_MODEL and the three DEFAULT_* pins: Claude Code otherwise requests
+#                         Anthropic's own model ids, which 9router only serves
+#                         if you aliased them. All three picker slots point at
+#                         the same router model so that switching model in /model
+#                         can't land on an unrouted id.
+#   ..._HAIKU_MODEL       also moves Claude's cheap background work (session
+#                         titles and the like) onto a model the router knows.
+#   ..._MODEL_DISCOVERY   asks the router for its model list at start-up and adds
+#                         it to /model, so you can see what you actually have.
+if (( want_9router )) && [[ -n "${NINEROUTER_API_KEY}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+        NR_BASE_URL="http://127.0.0.1:${NINEROUTER_PORT}" \
+        NR_API_KEY="${NINEROUTER_API_KEY}" \
+        NR_MODEL="${NINEROUTER_MODEL}" \
+        NR_SMALL_MODEL="${NINEROUTER_SMALL_MODEL:-${NINEROUTER_MODEL}}" \
+        python3 - "${CLAUDE_AUTH_DIR}/settings.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+
+env = data.setdefault("env", {})
+env["ANTHROPIC_BASE_URL"] = os.environ["NR_BASE_URL"]
+env["ANTHROPIC_AUTH_TOKEN"] = os.environ["NR_API_KEY"]
+env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+
+model = os.environ.get("NR_MODEL", "").strip()
+small = os.environ.get("NR_SMALL_MODEL", "").strip() or model
+if model:
+    env["ANTHROPIC_MODEL"] = model
+    env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
+    env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+if small:
+    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = small
+
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+        chmod 600 "${CLAUDE_AUTH_DIR}/settings.json"
+    else
+        echo "⚠️  python3 not found on host — can't point Claude at 9router." >&2
+        echo "    Claude will keep using your claude.ai login this run." >&2
+    fi
 fi
 
 # ── Register the built-in MCP servers (user scope) ─────────────────────────
@@ -422,10 +578,62 @@ if [[ -n "${GLAB_CONFIG_YAML}" ]]; then
     CMD=("codingseal-glab-init" "${CMD[@]}")
 fi
 
+# ── Start 9router alongside the container's command ────────────────────────
+# Wrapped OUTSIDE codingseal-glab-init (both shims exec "$@", so they chain):
+# the router has to be answering before Claude sends its first request, and
+# glab's config is only needed once a command actually runs.
+#
+# The dashboard is published to 127.0.0.1 ONLY. Inside the container 9router
+# binds 0.0.0.0 — it has to, since podman's port forwarding connects to the
+# container's own address rather than its loopback — so the host-side bind is
+# what keeps the router (and the provider credentials in it) off the network.
+if (( want_9router )); then
+    mkdir -p "${NINEROUTER_DATA_DIR}"
+    PODMAN_FLAGS+=(
+        "--env"     "CODINGSEAL_9ROUTER=1"
+        "--env"     "CODINGSEAL_9ROUTER_PORT=${NINEROUTER_PORT}"
+        "--publish" "127.0.0.1:${NINEROUTER_PORT}:${NINEROUTER_PORT}"
+        "--volume"  "${NINEROUTER_DATA_DIR}:/home/coder/.9router:Z"
+    )
+    # Read by 9router on first launch only, to set the dashboard password.
+    # codingseal-9router-init unsets it before running the container's command.
+    [[ -n "${NINEROUTER_PASSWORD}" ]] && \
+        PODMAN_FLAGS+=("--env" "INITIAL_PASSWORD=${NINEROUTER_PASSWORD}")
+    CMD=("codingseal-9router-init" "${CMD[@]}")
+fi
+
 # ── Print summary ─────────────────────────────────────────────────────────
 echo "Starting container '${CONTAINER_NAME}' from image '${IMAGE}'..."
 if [[ ${#GLAB_SUMMARY[@]} -gt 0 ]]; then
     echo "  glab: token loaded from ${GLAB_TOKEN_FILE} for ${GLAB_SUMMARY[*]}"
+fi
+if (( want_9router )); then
+    echo "  9router: dashboard on http://localhost:${NINEROUTER_PORT} (state: ${NINEROUTER_DATA_DIR})"
+    if [[ -n "${NINEROUTER_API_KEY}" ]]; then
+        echo "           Claude routes through it${NINEROUTER_MODEL:+ as ${NINEROUTER_MODEL}}"
+        if [[ -z "${NINEROUTER_MODEL}" ]]; then
+            echo ""
+            echo "  ⚠️  NINEROUTER_MODEL is not set, so Claude will ask 9router for"
+            echo "      Anthropic's own model ids (claude-opus-…). That only works if you"
+            echo "      aliased them in the dashboard; otherwise set one of 9router's ids:"
+            echo "        NINEROUTER_MODEL=kr/claude-sonnet-4.5"
+        fi
+    else
+        # Deliberately not fatal: on the very first run the key cannot exist yet,
+        # because you create it in the dashboard this run is about to start.
+        echo ""
+        echo "  ℹ️  NINEROUTER_API_KEY is not set — starting the router only."
+        echo "      Claude keeps using your claude.ai login, so this session still works."
+        echo "      To route Claude through 9router:"
+        echo "        1. open http://localhost:${NINEROUTER_PORT} and log in"
+        echo "           (first login password: ${NINEROUTER_PASSWORD:-123456})"
+        echo "        2. connect a provider, then create an API key"
+        echo "        3. put it in .env, with a model id from that provider:"
+        echo "             NINEROUTER_API_KEY=sk-..."
+        echo "             NINEROUTER_MODEL=kr/claude-sonnet-4.5"
+        echo "        4. re-run with --9router"
+    fi
+    echo ""
 fi
 if [[ "${MODE}" == "auth" ]]; then
     echo ""

@@ -384,6 +384,99 @@ RUN set -eu; \
     rm -f "${TGZ}" checksums.txt lazygit; \
     echo "lazygit OK: $(lazygit --version)"
 
+# ── 9router (local AI router / LLM gateway) ────────────────────────────────
+# 9router (https://github.com/decolua/9router, MIT) is a local proxy that speaks
+# the Anthropic Messages API on /v1/messages and forwards each request to
+# whichever provider you connected in its dashboard. That is exactly the shape
+# Claude Code expects from an LLM gateway, so no adapter is needed: run.sh
+# points Claude at it with ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN when you
+# pass --9router, and leaves the image untouched otherwise.
+#
+# Installed from npm, version-pinned like glab and lazygit above. The package is
+# big (~51 MB unpacked — it bundles a Next.js standalone build of the dashboard)
+# and it is placed LAST among the tool installs on purpose: bumping the version
+# then invalidates nothing above it, least of all the ~17-minute TeX Live layers.
+#
+# NOTHING is configured here. Providers, credentials and routing rules live in
+# 9router's SQLite database under $DATA_DIR (default ~/.9router), which run.sh
+# bind-mounts from the host — otherwise the provider logins you click through in
+# the dashboard would die with the container, which runs --rm.
+ARG NINEROUTER_VERSION=0.5.75
+RUN set -eu; \
+    npm install -g "9router@${NINEROUTER_VERSION}"; \
+    # --version short-circuits before the CLI touches the bundled server, so this
+    # only proves the install landed — the real smoke test is the readiness probe
+    # in codingseal-9router-init below, at run time, once a DATA_DIR exists.
+    echo "9router OK: $(9router --version)"
+
+# $DATA_DIR. Pre-created and owned by coder for the same reason as .config
+# above: --ssh starts the container as root, and run.sh bind-mounts a host
+# directory here that must be writable by uid 1000.
+RUN install -d -o coder -g coder -m 700 /home/coder/.9router
+
+# 9router is started at container start-up by this shim, which run.sh prepends to
+# the container's command (ahead of codingseal-glab-init — both exec "$@", so
+# they chain). Deliberately a wrapper rather than a second container: Claude
+# reaches the router over loopback, so there is no network to wire up, no
+# start-order race beyond the wait below, and the router dies with the session.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    '# codingseal-9router-init — start 9router, then exec the real command.' \
+    '# A no-op passthrough unless run.sh set CODINGSEAL_9ROUTER=1 (--9router), so' \
+    '# every other mode runs exactly as it did before this shim existed.' \
+    'set -eu' \
+    'if [ "${CODINGSEAL_9ROUTER:-}" = "1" ]; then' \
+    '    NR_PORT="${CODINGSEAL_9ROUTER_PORT:-20128}"' \
+    '    NR_DIR=/home/coder/.9router' \
+    '    # --ssh starts as root (sshd needs it); every other mode is already coder.' \
+    '    # The router must not run as root either way — its DATA_DIR is a bind-mount' \
+    '    # owned by uid 1000, and root-owned files in it would break the next run.' \
+    '    if [ "$(id -u)" = 0 ]; then' \
+    '        install -d -o coder -g coder -m 700 "${NR_DIR}"' \
+    '        NR_RUNAS="setpriv --reuid=1000 --regid=1000 --init-groups --"' \
+    '    else' \
+    '        mkdir -p "${NR_DIR}"' \
+    '        NR_RUNAS=""' \
+    '    fi' \
+    '    # Flags, and why each one is load-bearing in a container:' \
+    '    #   --skip-update  the version is pinned in the Containerfile; without this' \
+    '    #                  the CLI queries the npm registry at every start and can' \
+    '    #                  relaunch itself detached mid-session.' \
+    '    #   -n             there is no browser in here to open.' \
+    '    #   </dev/null     with no TTY on stdin the CLI skips its interactive menu' \
+    '    #                  and runs its background supervisor loop instead, which is' \
+    '    #                  what restarts the server if it crashes.' \
+    '    # Output goes to a log FILE, never stdout: in the default mode stdout is the' \
+    '    # terminal Claude is drawing its TUI on.' \
+    '    # NR_RUNAS is deliberately unquoted — it is a command prefix that must split.' \
+    '    # One long line on purpose: a backslash continuation here would have to' \
+    '    # survive both this printf and the Dockerfile parser, which reads a' \
+    '    # trailing backslash as its own line continuation.' \
+    '    # shellcheck disable=SC2086' \
+    '    $NR_RUNAS env HOME=/home/coder DATA_DIR="${NR_DIR}" 9router --skip-update -n -p "${NR_PORT}" </dev/null >>"${NR_DIR}/server.log" 2>&1 &' \
+    '    # Wait for it to answer before handing over. Claude Code issues its first' \
+    '    # request immediately, and a connection refused there surfaces as an opaque' \
+    '    # auth/network error rather than "the router has not finished booting".' \
+    '    # Any HTTP status counts as ready (no -f): / redirects, /v1 wants a key.' \
+    '    nr_ready=0' \
+    '    nr_i=0' \
+    '    while [ "${nr_i}" -lt 90 ]; do' \
+    '        if curl -s -o /dev/null "http://127.0.0.1:${NR_PORT}/"; then nr_ready=1; break; fi' \
+    '        nr_i=$((nr_i + 1))' \
+    '        sleep 1' \
+    '    done' \
+    '    if [ "${nr_ready}" = 0 ]; then' \
+    '        echo "⚠️  9router did not answer on port ${NR_PORT} within 90s." >&2' \
+    '        echo "    Claude will fail to reach it. Logs: ${NR_DIR}/server.log" >&2' \
+    '    fi' \
+    '    # Keep the dashboard password out of the command'"'"'s environment; the' \
+    '    # router already inherited it when it was started above.' \
+    '    unset INITIAL_PASSWORD' \
+    'fi' \
+    'exec "$@"' \
+    > /usr/local/bin/codingseal-9router-init \
+    && chmod 0755 /usr/local/bin/codingseal-9router-init
+
 # ── SSH server setup ───────────────────────────────────────────────────────
 # Bake the host keys at build time — stable across container starts, so no
 # "host key changed" warnings — and pre-create coder's .ssh dir (mode 700). In
@@ -434,7 +527,10 @@ RUN chown -R coder:coder /home/coder
 # ── Workspace ──────────────────────────────────────────────────────────────
 WORKDIR /home/coder
 
-EXPOSE 2222
+# 2222 = sshd (--ssh), 20128 = the 9router dashboard + API (--9router). Both are
+# documentation only; run.sh decides what is actually published, and only ever
+# to 127.0.0.1 on the host.
+EXPOSE 2222 20128
 
 # tini as PID 1 (reaps zombies; runs sshd as root in --ssh mode). run.sh supplies
 # the per-mode command (claude / claude remote-control / sshd) and the user: the
