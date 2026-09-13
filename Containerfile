@@ -356,6 +356,34 @@ RUN printf '%s\n' \
     > /usr/local/bin/codingseal-glab-init \
     && chmod 0755 /usr/local/bin/codingseal-glab-init
 
+# ── lazygit (git TUI) ──────────────────────────────────────────────────────
+# Ubuntu 24.04 ships no lazygit package (`apt-cache policy lazygit` is empty), so
+# take the upstream release tarball: a single static Go binary, arch-aware,
+# version-pinned, and checksum-verified against the checksums.txt published with
+# the same release — same approach as glab above.
+#
+# It needs nothing else: `git` is already installed, and lazygit reads the repo
+# in the mounted project plus your normal git config. Pushing over SSH uses the
+# forwarded agent like any other git command.
+ARG LAZYGIT_VERSION=0.64.0
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) LG_ARCH="x86_64" ;; \
+      arm64) LG_ARCH="arm64" ;; \
+      *) echo "Error: no lazygit build for architecture '$(dpkg --print-architecture)'" >&2; exit 1 ;; \
+    esac; \
+    BASE="https://github.com/jesseduffield/lazygit/releases/download/v${LAZYGIT_VERSION}"; \
+    TGZ="lazygit_${LAZYGIT_VERSION}_linux_${LG_ARCH}.tar.gz"; \
+    cd /tmp; \
+    curl -fsSL -o "${TGZ}" "${BASE}/${TGZ}"; \
+    curl -fsSL -o checksums.txt "${BASE}/checksums.txt"; \
+    grep " ${TGZ}\$" checksums.txt | sha256sum -c -; \
+    # The tarball also carries LICENSE/README.md; only the binary is wanted.
+    tar -xzf "${TGZ}" lazygit; \
+    install -m 0755 lazygit /usr/local/bin/lazygit; \
+    rm -f "${TGZ}" checksums.txt lazygit; \
+    echo "lazygit OK: $(lazygit --version)"
+
 # ── SSH server setup ───────────────────────────────────────────────────────
 # Bake the host keys at build time — stable across container starts, so no
 # "host key changed" warnings — and pre-create coder's .ssh dir (mode 700). In

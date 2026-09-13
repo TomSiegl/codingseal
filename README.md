@@ -232,6 +232,8 @@ scripts/run.sh -p ~/projects/myproject
 
 You land directly in `claude`. Type your task. Claude's bash commands run in the container.
 
+`lazygit` is installed too — a terminal UI over the git repo in whatever project you mounted with `-p` (staging hunks, branches, rebases, log). It uses your normal git config, and pushes go over SSH with your forwarded agent like any other git command.
+
 `tmux` is installed in the image, which is mostly useful over SSH (Modes B–C): start work inside `tmux`, and a dropped connection leaves the session running — reattach with `tmux attach`. Note that it does **not** survive the container itself: `run.sh` uses `--rm`, so exiting the container discards every tmux session with it.
 
 To get a plain shell instead (bare `--userns=keep-id` runs you as the non-root `coder` user — no `--user 0`, which is only needed for the `--ssh` mode's sshd):
@@ -765,6 +767,7 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 | `glab`: second project on the same instance is unauthenticated | glab stores one token per hostname — `run.sh` warns and keeps the first `-p` project's token | Intended with per-project scopes: run one project at a time, or issue one token covering both |
 | `glab`: `403 Forbidden` on a write (`glab mr create`, `glab issue note`) | The token is scoped `read_api` | Expected — `read_api` is read-only. Use a token with `api` scope if you need writes |
 | `pdflatex: command not found` | Image built with `LATEX_SCHEME=none`, or predates LaTeX support | Rebuild: `podman build -t coding-seal:latest .` |
+| `lazygit: command not found` | Image predates lazygit | Rebuild: `podman build -t coding-seal:latest .` (pin another release with `--build-arg LAZYGIT_VERSION=0.64.0`) |
 | `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 11](#11-latex) |
 | `pdfcrop`/`texcount` not found but every `.sty` is present | Style files and executables come from *different* packages — these binaries live in `texlive-extra-utils` | Present in `curated` and `full`; add `texlive-extra-utils` if you customised the list |
 | `LaTeX Error: File 'foo.sty' not found` | The package isn't in the scheme you built | Add the owning `texlive-*` package to the `curated` list in the `Containerfile` and rebuild, or build `LATEX_SCHEME=full`. Find the owner via [packages.ubuntu.com](https://packages.ubuntu.com) |
@@ -782,7 +785,7 @@ codingseal/
 ├── codingseal.png            ← Project logo
 ├── README.md                 ← This tutorial
 ├── LATEX.md                  ← LaTeX package sets, what each scheme omits, trade-offs (§11)
-├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + glab + sshd + tmux (tini as PID 1, no entrypoint script)
+├── Containerfile             ← ubuntu:24.04 + Node LTS + Claude Code + uv + Python + TeX Live + glab + sshd + tmux + lazygit (tini as PID 1, no entrypoint script)
 ├── .env.example              ← Copy to .env; set SSH_PUBLIC_KEY for --ssh
 ├── scripts/
 │   └── run.sh                ← Wrapper: seeds config (incl. glab tokens from the -p dirs) + runs --auth / --rc / --ssh / -p PATH / --gpu-nvidia|amd
