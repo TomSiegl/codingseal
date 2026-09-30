@@ -322,6 +322,7 @@ RUN npm install -g @upstash/context7-mcp @modelcontextprotocol/server-sequential
 # NOT installed here (only the bundled Chromium is), so every browser_* tool
 # call fails with "Chromium distribution 'chrome' is not found". run.sh also
 # passes --browser chromium; the env var covers servers registered by hand.
+# SSH sessions don't inherit ENV: both variables are repeated in sshd_config.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
     PLAYWRIGHT_MCP_BROWSER=chromium
 RUN npm install -g @playwright/mcp \
@@ -334,7 +335,8 @@ RUN npm install -g @playwright/mcp \
 # ── uv + Python in SHARED locations (reachable by the non-root user) ───────
 # The default installer drops uv under /root (mode 700); coder couldn't read it.
 # Install uv into /usr/local/bin and the managed Python into /opt/uv/python,
-# both world-readable, so coder uses the same toolchain.
+# both world-readable, so coder uses the same toolchain. SSH sessions do not
+# inherit ENV: UV_PYTHON_INSTALL_DIR is repeated in sshd_config.
 ENV UV_INSTALL_DIR=/usr/local/bin \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh

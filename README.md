@@ -201,7 +201,7 @@ Together these mean Claude never stops to ask:
 | "Cannot skip permissions as root" | Claude runs as the **non-root `coder` user** — the guard only triggers for root, so the check never fires |
 | "Try the new fullscreen renderer?" | `tui: "default"` pinned in settings.json — any explicit `tui` value suppresses the upsell (use `"fullscreen"` if you prefer the flicker-free alt-screen UI) |
 | Re-login on every run | `CLAUDE_CONFIG_DIR` (= the persistent host auth folder) holds `.credentials.json` |
-| Prompts/login over **SSH / VS Code** | `config/sshd_config` sets a static `SetEnv CLAUDE_CONFIG_DIR=/home/coder/.claude`, so SSH sessions read the same login + settings as a local run |
+| Prompts/login over **SSH / VS Code** | `config/sshd_config` sets a static `SetEnv CLAUDE_CONFIG_DIR=/home/coder/.claude`, so SSH sessions read the same login + settings as a local run (it also repeats the image's `PLAYWRIGHT_*` and `UV_PYTHON_INSTALL_DIR`, which sshd would otherwise drop) |
 
 These are applied automatically by [scripts/run.sh](scripts/run.sh) and [config/claude-settings.json](config/claude-settings.json) — you don't need to do anything.
 
@@ -798,6 +798,7 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 | `lazygit: command not found` | Image predates lazygit | Rebuild: `podman build -t coding-seal:latest .` (pin another release with `--build-arg LAZYGIT_VERSION=0.65.1`) |
 | Playwright MCP fails to launch the browser (`Executable doesn't exist` or similar) | Image predates the Playwright MCP server, or `PLAYWRIGHT_BROWSERS_PATH` wasn't readable | Rebuild: `podman build -t coding-seal:latest .`; check with `claude mcp list` (should show `playwright ✓`) |
 | Playwright MCP fails with `Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome` | Server registered without `--browser chromium` by an older `run.sh`, on an image without `PLAYWRIGHT_MCP_BROWSER` | Restart the container with the current `run.sh` (it rewrites the `playwright` entry), or rebuild the image |
+| Playwright MCP over SSH fails with `Executable doesn't exist at /home/coder/.cache/ms-playwright/...` | Image predates `PLAYWRIGHT_BROWSERS_PATH` in `sshd_config` — SSH sessions don't inherit the image's ENV | Rebuild the image and restart the container |
 | `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 11](#11-latex) |
 | `pdfcrop`/`texcount` not found but every `.sty` is present | Style files and executables come from *different* packages — these binaries live in `texlive-extra-utils` | Present in `curated` and `full`; add `texlive-extra-utils` if you customised the list |
 | `LaTeX Error: File 'foo.sty' not found` | The package isn't in the scheme you built | Add the owning `texlive-*` package to the `curated` list in the `Containerfile` and rebuild, or build `LATEX_SCHEME=full`. Find the owner via [packages.ubuntu.com](https://packages.ubuntu.com) |
@@ -846,6 +847,6 @@ codingseal/
 │                                --ssh / -p PATH / --gpu-nvidia|amd / --model / --advisor. No --rm: containers
 │                                persist (Exited) after exit — see Section 3, "Container lifecycle"
 └── config/
-    ├── sshd_config           ← Port 2222, key-only auth, static SetEnv CLAUDE_CONFIG_DIR, VS Code keepalive
+    ├── sshd_config           ← Port 2222, key-only auth, static SetEnv (CLAUDE_CONFIG_DIR + image ENV sshd drops), VS Code keepalive
     └── claude-settings.json  ← bypassPermissions + full allow list + enabled plugins (seeded into the auth folder by run.sh)
 ```

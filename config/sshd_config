@@ -29,7 +29,18 @@ AcceptEnv LANG LC_*
 # a fixed path, so it's static here (no entrypoint needed). Auth is login-only —
 # `scripts/run.sh --auth` saves the credential into the volume that every session
 # reads — so there is no token/API key to forward.
-SetEnv CLAUDE_CONFIG_DIR=/home/coder/.claude
+#
+# sshd gives sessions NONE of the image's ENV, so every ENV a tool needs to find
+# what the Containerfile baked in must be repeated here, or SSH sessions silently
+# fall back to per-user defaults:
+#   PLAYWRIGHT_BROWSERS_PATH  without it Playwright MCP looks in the empty
+#                             ~/.cache/ms-playwright and can't find Chromium
+#   PLAYWRIGHT_MCP_BROWSER    bundled Chromium, not Google Chrome (run.sh also
+#                             passes --browser chromium)
+#   UV_PYTHON_INSTALL_DIR     without it uv ignores the baked Python in
+#                             /opt/uv/python and downloads its own into ~/.local
+# Keep these in sync with the ENV lines in the Containerfile.
+SetEnv CLAUDE_CONFIG_DIR=/home/coder/.claude PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers PLAYWRIGHT_MCP_BROWSER=chromium UV_PYTHON_INSTALL_DIR=/opt/uv/python
 
 # Log to stderr so `podman logs` captures it
 SyslogFacility AUTH
