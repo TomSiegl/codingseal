@@ -289,6 +289,41 @@ RUN npm install -g @anthropic-ai/claude-code
 # needs nothing baked here; run.sh adds it only when a PAT is provided.)
 RUN npm install -g @upstash/context7-mcp @modelcontextprotocol/server-sequential-thinking
 
+# ── Playwright MCP (headless browser for Claude's debug loop) ─────────────
+# Lets Claude drive an actual browser from inside the container: navigate to a
+# page it's serving (e.g. a local dev server), read the DOM/console, click
+# through a flow, take a screenshot — all via MCP tool calls, registered by
+# run.sh like the servers above. No display is needed: Chromium's own headless
+# mode renders without Xvfb/X11, which is what makes this work on a headless host
+# (run.sh passes --headless when it registers the server).
+#
+# PLAYWRIGHT_BROWSERS_PATH, like UV_PYTHON_INSTALL_DIR above, moves the browser
+# out of the default (root-only, mode 700) cache dir into one `coder` can read.
+# `install-deps` apt-installs Chromium's system libraries (fonts, graphics
+# stack) — there is no way to skip this; the browser will not render without
+# them. Both the "chromium" and "chromium-headless-shell" builds are installed
+# (no `--no-shell`): launching with `headless: true` resolves to the SEPARATE
+# headless-shell binary, not full Chromium run with a flag — confirmed by
+# testing `--no-shell` here first, which reliably fails with "Executable
+# doesn't exist at .../chromium_headless_shell-.../chrome-headless-shell".
+#
+# The installer is invoked as `node .../playwright-core/cli.js`, NOT as
+# `npx playwright-core` (Microsoft's own docs show the latter for their
+# Playwright MCP Docker image, but that resolves and downloads a SEPARATE,
+# unpinned playwright-core from the registry — its "latest" browser revision
+# does not necessarily match the revision @playwright/mcp's own nested
+# playwright-core dependency expects, and a mismatch is a hard failure at
+# runtime ("Executable doesn't exist"), also confirmed by testing here first.
+# Running the exact playwright-core that @playwright/mcp already depends on
+# guarantees the installed browser revision is the one it will actually ask for.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN npm install -g @playwright/mcp \
+    && PW_CORE="$(npm root -g)/@playwright/mcp/node_modules/playwright-core/cli.js" \
+    && node "${PW_CORE}" install-deps chromium \
+    && node "${PW_CORE}" install chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /opt/playwright-browsers
+
 # ── uv + Python in SHARED locations (reachable by the non-root user) ───────
 # The default installer drops uv under /root (mode 700); coder couldn't read it.
 # Install uv into /usr/local/bin and the managed Python into /opt/uv/python,

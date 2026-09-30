@@ -492,9 +492,12 @@ The container ships with [MCP](https://modelcontextprotocol.io) servers so Claud
 |---|---|---|---|
 | **context7** | Up-to-date, version-specific library/API docs pulled on demand | Always | Optional `CONTEXT7_API_KEY` (higher rate limits) |
 | **sequential-thinking** | A step-by-step reasoning scaffold for harder problems | Always | None |
+| **playwright** | A headless Chromium browser Claude can drive — navigate, click, read the DOM/console, screenshot — useful for a debug loop against a local dev server | Always | None |
 | **github** | Issues, PRs, and repos via the GitHub API | Only when `GITHUB_PERSONAL_ACCESS_TOKEN` is set | Your token, sent as a Bearer header |
 
-`context7` and `sequential-thinking` run **inside the container** as stdio servers (their npm packages are baked into the image). `github` is GitHub's **remote** endpoint (`https://api.githubcopilot.com/mcp/`) — nothing is baked for it; it's added only when you provide a token.
+`context7`, `sequential-thinking` and `playwright` run **inside the container** as stdio servers (their npm packages are baked into the image). `github` is GitHub's **remote** endpoint (`https://api.githubcopilot.com/mcp/`) — nothing is baked for it; it's added only when you provide a token.
+
+`playwright` always runs `--headless` — this container has no display, and Chromium's own headless mode needs none (no Xvfb/X11 required).
 
 **Turn on / configure** (optional) in `.env`:
 ```bash
@@ -504,7 +507,7 @@ GITHUB_PERSONAL_ACCESS_TOKEN=ghp_...     # enables the GitHub MCP server
 
 **Verify** inside the container:
 ```bash
-claude mcp list        # context7 ✓, sequential-thinking ✓ (github ✓ only with a token)
+claude mcp list        # context7 ✓, sequential-thinking ✓, playwright ✓ (github ✓ only with a token)
 # or run /mcp inside an interactive Claude session to see each server's tools
 ```
 Then ask, e.g., *"use context7 to get the current Next.js App Router docs."*
@@ -783,6 +786,7 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 | `glab`: `403 Forbidden` on a write (`glab mr create`, `glab issue note`) | The token is scoped `read_api` | Expected — `read_api` is read-only. Use a token with `api` scope if you need writes |
 | `pdflatex: command not found` | Image built with `LATEX_SCHEME=none`, or predates LaTeX support | Rebuild: `podman build -t coding-seal:latest .` |
 | `lazygit: command not found` | Image predates lazygit | Rebuild: `podman build -t coding-seal:latest .` (pin another release with `--build-arg LAZYGIT_VERSION=0.65.1`) |
+| Playwright MCP fails to launch the browser (`Executable doesn't exist` or similar) | Image predates the Playwright MCP server, or `PLAYWRIGHT_BROWSERS_PATH` wasn't readable | Rebuild: `podman build -t coding-seal:latest .`; check with `claude mcp list` (should show `playwright ✓`) |
 | `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 11](#11-latex) |
 | `pdfcrop`/`texcount` not found but every `.sty` is present | Style files and executables come from *different* packages — these binaries live in `texlive-extra-utils` | Present in `curated` and `full`; add `texlive-extra-utils` if you customised the list |
 | `LaTeX Error: File 'foo.sty' not found` | The package isn't in the scheme you built | Add the owning `texlive-*` package to the `curated` list in the `Containerfile` and rebuild, or build `LATEX_SCHEME=full`. Find the owner via [packages.ubuntu.com](https://packages.ubuntu.com) |

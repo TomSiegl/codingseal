@@ -276,6 +276,7 @@ fi
 # --ssh) with no approval prompt. Idempotent: existing keys are preserved.
 #   context7            — up-to-date library docs (stdio, baked in the image)
 #   sequential-thinking — reasoning scaffold (stdio, baked in the image)
+#   playwright          — headless browser for Claude's debug loop (stdio, baked in the image)
 #   github              — remote endpoint, added ONLY when a PAT is provided
 # Optional credentials come from the environment (i.e. your .env):
 #   CONTEXT7_API_KEY                higher Context7 rate limits (works without it)
@@ -307,6 +308,13 @@ servers["context7"] = {"command": "npx", "args": ctx_args}
 servers["sequential-thinking"] = {
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+}
+
+# --headless: this container has no display, and Playwright MCP defaults to a
+# headed browser (it would fail to launch at all without this flag).
+servers["playwright"] = {
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp", "--headless"],
 }
 
 if gh_pat:
