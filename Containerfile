@@ -8,7 +8,10 @@ ENV LANG=C.UTF-8 \
 
 # ── System packages ────────────────────────────────────────────────────────
 # util-linux (provides setpriv, used to drop to the coder user) is already in base.
+# build-essential brings gcc, g++, make and libc6-dev — a C/C++ toolchain for
+# native Node/Python addons and for compiling code directly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
         ca-certificates \
         curl \
         gnupg \
@@ -294,7 +297,7 @@ ENV UV_INSTALL_DIR=/usr/local/bin \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.13
 RUN uv python install ${PYTHON_VERSION} && \
     UV_PYTHON=$(uv python find ${PYTHON_VERSION}) && \
     ln -sf "${UV_PYTHON}" /usr/local/bin/python3 && \
@@ -312,7 +315,7 @@ RUN uv python install ${PYTHON_VERSION} && \
 # file found in the project you pass with -p. Because that is glab's DEFAULT
 # config location, it works in every mode — including SSH sessions, which never
 # see the container's environment (sshd drops it; see config/sshd_config).
-ARG GLAB_VERSION=1.112.0
+ARG GLAB_VERSION=1.120.0
 RUN set -eu; \
     ARCH="$(dpkg --print-architecture)"; \
     case "${ARCH}" in \
@@ -365,7 +368,7 @@ RUN printf '%s\n' \
 # It needs nothing else: `git` is already installed, and lazygit reads the repo
 # in the mounted project plus your normal git config. Pushing over SSH uses the
 # forwarded agent like any other git command.
-ARG LAZYGIT_VERSION=0.64.0
+ARG LAZYGIT_VERSION=0.65.1
 RUN set -eu; \
     case "$(dpkg --print-architecture)" in \
       amd64) LG_ARCH="x86_64" ;; \
