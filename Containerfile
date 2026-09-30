@@ -316,7 +316,14 @@ RUN npm install -g @upstash/context7-mcp @modelcontextprotocol/server-sequential
 # runtime ("Executable doesn't exist"), also confirmed by testing here first.
 # Running the exact playwright-core that @playwright/mcp already depends on
 # guarantees the installed browser revision is the one it will actually ask for.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+#
+# PLAYWRIGHT_MCP_BROWSER=chromium: Playwright MCP otherwise defaults to the
+# "chrome" channel — real Google Chrome at /opt/google/chrome/chrome, which is
+# NOT installed here (only the bundled Chromium is), so every browser_* tool
+# call fails with "Chromium distribution 'chrome' is not found". run.sh also
+# passes --browser chromium; the env var covers servers registered by hand.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
+    PLAYWRIGHT_MCP_BROWSER=chromium
 RUN npm install -g @playwright/mcp \
     && PW_CORE="$(npm root -g)/@playwright/mcp/node_modules/playwright-core/cli.js" \
     && node "${PW_CORE}" install-deps chromium \

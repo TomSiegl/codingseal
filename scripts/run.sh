@@ -312,9 +312,13 @@ servers["sequential-thinking"] = {
 
 # --headless: this container has no display, and Playwright MCP defaults to a
 # headed browser (it would fail to launch at all without this flag).
+# --browser chromium: without it Playwright MCP defaults to the "chrome" channel,
+# i.e. real Google Chrome at /opt/google/chrome/chrome, which the image doesn't
+# ship — every browser_* call fails. "chromium" resolves to the bundled
+# Chromium the Containerfile installs into PLAYWRIGHT_BROWSERS_PATH.
 servers["playwright"] = {
     "command": "npx",
-    "args": ["-y", "@playwright/mcp", "--headless"],
+    "args": ["-y", "@playwright/mcp", "--headless", "--browser", "chromium"],
 }
 
 if gh_pat:

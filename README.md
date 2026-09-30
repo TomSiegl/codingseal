@@ -497,7 +497,7 @@ The container ships with [MCP](https://modelcontextprotocol.io) servers so Claud
 
 `context7`, `sequential-thinking` and `playwright` run **inside the container** as stdio servers (their npm packages are baked into the image). `github` is GitHub's **remote** endpoint (`https://api.githubcopilot.com/mcp/`) — nothing is baked for it; it's added only when you provide a token.
 
-`playwright` always runs `--headless` — this container has no display, and Chromium's own headless mode needs none (no Xvfb/X11 required).
+`playwright` always runs `--headless` — this container has no display, and Chromium's own headless mode needs none (no Xvfb/X11 required). It also runs `--browser chromium` (plus `PLAYWRIGHT_MCP_BROWSER=chromium` in the image): Playwright MCP otherwise defaults to real Google Chrome, which the image doesn't ship.
 
 **Turn on / configure** (optional) in `.env`:
 ```bash
@@ -787,6 +787,7 @@ CLAUDE_IMAGE=localhost/coding-seal:latex-full scripts/run.sh -p ~/projects/paper
 | `pdflatex: command not found` | Image built with `LATEX_SCHEME=none`, or predates LaTeX support | Rebuild: `podman build -t coding-seal:latest .` |
 | `lazygit: command not found` | Image predates lazygit | Rebuild: `podman build -t coding-seal:latest .` (pin another release with `--build-arg LAZYGIT_VERSION=0.65.1`) |
 | Playwright MCP fails to launch the browser (`Executable doesn't exist` or similar) | Image predates the Playwright MCP server, or `PLAYWRIGHT_BROWSERS_PATH` wasn't readable | Rebuild: `podman build -t coding-seal:latest .`; check with `claude mcp list` (should show `playwright ✓`) |
+| Playwright MCP fails with `Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome` | Server registered without `--browser chromium` by an older `run.sh`, on an image without `PLAYWRIGHT_MCP_BROWSER` | Restart the container with the current `run.sh` (it rewrites the `playwright` entry), or rebuild the image |
 | `xelatex` missing, `biber` missing, or `tikz.sty not found` | Image built with `LATEX_SCHEME=minimal` — it has pdflatex/lualatex/latex but no xelatex, no biber and no tikz | Rebuild with the default (`curated`) or `full` — see [Section 11](#11-latex) |
 | `pdfcrop`/`texcount` not found but every `.sty` is present | Style files and executables come from *different* packages — these binaries live in `texlive-extra-utils` | Present in `curated` and `full`; add `texlive-extra-utils` if you customised the list |
 | `LaTeX Error: File 'foo.sty' not found` | The package isn't in the scheme you built | Add the owning `texlive-*` package to the `curated` list in the `Containerfile` and rebuild, or build `LATEX_SCHEME=full`. Find the owner via [packages.ubuntu.com](https://packages.ubuntu.com) |
