@@ -339,6 +339,37 @@ else
     echo "      claude mcp add --scope user context7 -- npx -y @upstash/context7-mcp" >&2
 fi
 
+# ── Install the built-in Claude Code plugins (user scope) ─────────────────
+#   mattpocock-skills — Matt Pocock's engineering skills (grilling, TDD, spec/
+#                       ticket flows, code review, …) from the official marketplace
+# settings.json (seeded above) already enables them and declares the official
+# marketplace, but that alone installs nothing: `claude plugin list` stays empty
+# until `claude plugin install` has fetched the plugin into the auth dir's
+# plugins/ cache. So, only for plugins that aren't there yet, run a one-shot
+# container that installs them — the cache lives in the auth dir, so this
+# happens once, not every run, and the plugin updates itself afterwards.
+# A fresh auth dir has NO marketplaces (the official one is otherwise only added
+# by an interactive session), hence the `marketplace add` first.
+CLAUDE_PLUGINS=("mattpocock-skills@claude-plugins-official")
+MISSING_PLUGINS=()
+for plugin in "${CLAUDE_PLUGINS[@]}"; do
+    grep -qF "\"${plugin}\"" "${CLAUDE_AUTH_DIR}/plugins/installed_plugins.json" 2>/dev/null \
+        || MISSING_PLUGINS+=("${plugin}")
+done
+if [[ ${#MISSING_PLUGINS[@]} -gt 0 ]]; then
+    echo "Installing Claude Code plugins: ${MISSING_PLUGINS[*]}"
+    podman run --rm \
+        --userns=keep-id:uid=1000,gid=1000 \
+        --volume "${CLAUDE_AUTH_DIR}:/home/coder/.claude:Z" \
+        "${IMAGE}" bash -c '
+            claude plugin marketplace list | grep -q claude-plugins-official \
+                || claude plugin marketplace add anthropics/claude-plugins-official || exit 1
+            for plugin in "$@"; do
+                claude plugin install --scope user "${plugin}" || exit 1
+            done' _ "${MISSING_PLUGINS[@]}" \
+        || echo "⚠️  Plugin install failed (offline?) — starting without it; the next run retries." >&2
+fi
+
 # ── glab: per-project GitLab tokens ───────────────────────────────────────
 # The token for a project lives IN that project: <project>/.glab-token, holding
 # nothing but the token (gitignore it). For every -p directory that has one we add

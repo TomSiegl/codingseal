@@ -516,6 +516,16 @@ Then ask, e.g., *"use context7 to get the current Next.js App Router docs."*
 
 > Context7's stdio server still reaches Context7's cloud for the actual doc content, so the container needs outbound network. It works anonymously (rate-limited) without a key.
 
+### Plugins
+
+[Matt Pocock's skills](https://github.com/mattpocock/skills) (`mattpocock-skills`, from Claude Code's official marketplace) are installed at **user scope**: grilling, TDD, spec/ticket flows, code review, domain modelling and more, invoked as `/mattpocock-skills:<skill>` (e.g. `/mattpocock-skills:tdd`). Run `/mattpocock-skills:setup-matt-pocock-skills` once per project.
+
+`config/claude-settings.json` enables the plugin, but enabling doesn't download it — so on a run where the auth folder doesn't have it yet, `run.sh` installs it with a short one-shot container before starting yours. That happens once; afterwards the plugin lives in `~/.codingseal/claude-auth/plugins/` and updates itself. If the install fails (e.g. offline), the container starts without it and the next run retries.
+
+**Verify** inside the container: `claude plugin list` (should show `mattpocock-skills@claude-plugins-official … ✔ enabled`).
+
+**Remove it**: delete its line from `enabledPlugins` in `config/claude-settings.json` (and from `CLAUDE_PLUGINS` in `run.sh`, which would otherwise keep installing it).
+
 ---
 
 ## 8. GitLab CLI (glab)
@@ -837,5 +847,5 @@ codingseal/
 │                                persist (Exited) after exit — see Section 3, "Container lifecycle"
 └── config/
     ├── sshd_config           ← Port 2222, key-only auth, static SetEnv CLAUDE_CONFIG_DIR, VS Code keepalive
-    └── claude-settings.json  ← bypassPermissions + full allow list (seeded into the auth folder by run.sh)
+    └── claude-settings.json  ← bypassPermissions + full allow list + enabled plugins (seeded into the auth folder by run.sh)
 ```
